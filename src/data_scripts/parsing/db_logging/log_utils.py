@@ -140,6 +140,30 @@ def log_operation_manual_pdf(run_log, op_id: str | None, manual_pdf, parser_cls:
     )
 
 
+def log_operation_playwright_ok(
+    run_log,
+    op_id: str | None,
+    source_url: str,
+    parser_cls: type,
+    sections: list,
+    wanted_count: int,
+) -> None:
+    """Финализирует операцию, успешно выполненную через Garant Playwright."""
+    if not (run_log and op_id):
+        return
+    run_log.end_operation(
+        op_id,
+        status="ok",
+        winning_source_url=source_url,
+        winning_extractor="GarantPlaywrightDownloader",
+        winning_parser=parser_cls.__name__,
+        sections_total=len(sections),
+        sections_saved=len(sections),
+        wanted_count=wanted_count,
+        sources_tried=1,
+    )
+
+
 def log_operation_fail(run_log, op_id: str | None, sources_tried: int, last_error: Exception | None) -> None:
     """Финализирует операцию, завершившуюся провалом всех источников."""
     if not (run_log and op_id):

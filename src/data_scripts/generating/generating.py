@@ -27,6 +27,7 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 from openai import OpenAI
+from config_validation import validate_pipeline_config
 
 # ---------------------------------------------------------------------------
 # Настройка путей
@@ -66,6 +67,9 @@ OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 # Загрузка спарсенных секций реальных НПА
 # ---------------------------------------------------------------------------
 _sections_cache: dict[str, dict] = {}
+MAX_REF_SECTION_CHARS = 20_000
+MAX_REF_TOTAL_CHARS = 90_000
+_CLIP_MARKER = "\n\n[...фрагмент сокращён для ограничения размера контекста...]\n\n"
 
 
 def _load_doc_sections(doc_id: str) -> dict:
@@ -80,6 +84,20 @@ def _load_doc_sections(doc_id: str) -> dict:
     return _sections_cache[doc_id]
 
 
+def _clip_text_middle(text: str, max_chars: int) -> tuple[str, bool]:
+    """Ограничивает размер текста, сохраняя начало и конец."""
+    if len(text) <= max_chars:
+        return text, False
+    if max_chars <= len(_CLIP_MARKER) + 200:
+        return text[:max_chars], True
+
+    body_budget = max_chars - len(_CLIP_MARKER)
+    head = int(body_budget * 0.7)
+    tail = body_budget - head
+    clipped = text[:head].rstrip() + _CLIP_MARKER + text[-tail:].lstrip()
+    return clipped, True
+
+
 def build_reference_context(doc_spec: dict) -> str:
     """Формирует блок нормативной базы для промпта.
 
@@ -91,24 +109,47 @@ def build_reference_context(doc_spec: dict) -> str:
         return ""
 
     if isinstance(refs[0], str):
-        return f"Нормативные ссылки: {', '.join(refs)}"
+        raise ValueError(
+            "Неподдерживаемый формат references (list[str]). "
+            "Используй структуру list[dict] с полями doc/sections."
+        )
 
     found: list[str] = []
     missing: list[str] = []
+    shortened_notes: list[str] = []
+    remaining_budget = MAX_REF_TOTAL_CHARS
 
     for ref in refs:
         doc_id = ref["doc"]
         sections = _load_doc_sections(doc_id)
         for sec in ref.get("sections", []):
             sec_id = sec["id"]
+            sec_note = sec.get("note", "без пояснения")
             entry = sections.get(sec_id)
             if entry:
                 text = entry.get("text", entry) if isinstance(entry, dict) else str(entry)
                 title = entry.get("title", "") if isinstance(entry, dict) else ""
-                header = f"**{doc_id}, {sec_id}**" + (f" — {title}" if title else f" ({sec['note']})")
-                found.append(f"\n{header}\n{text.strip()}")
+                header = f"**{doc_id}, {sec_id}**" + (f" — {title}" if title else f" ({sec_note})")
+
+                normalized = text.strip()
+                normalized, section_clipped = _clip_text_middle(
+                    normalized, MAX_REF_SECTION_CHARS
+                )
+
+                if len(normalized) > remaining_budget:
+                    if remaining_budget <= 0:
+                        shortened_notes.append(f"{doc_id} {sec_id}: пропущено по лимиту контекста")
+                        continue
+                    normalized, budget_clipped = _clip_text_middle(normalized, remaining_budget)
+                    section_clipped = section_clipped or budget_clipped
+
+                remaining_budget -= len(normalized)
+                if section_clipped:
+                    shortened_notes.append(f"{doc_id} {sec_id}: текст сокращён")
+
+                found.append(f"\n{header}\n{normalized}")
             else:
-                missing.append(f"{doc_id} {sec_id} ({sec['note']})")
+                missing.append(f"{doc_id} {sec_id} ({sec_note})")
 
     lines: list[str] = []
     if found:
@@ -116,12 +157,22 @@ def build_reference_context(doc_spec: dict) -> str:
             "Нормативная база — извлечения из актуальных документов "
             "(используй эти формулировки и цифры дословно, не изменяй):"
         )
+        if shortened_notes:
+            lines.append(
+                "Примечание: часть длинных извлечений сокращена, чтобы уложиться в лимит входного контекста."
+            )
         lines.extend(found)
     if missing:
         raise ValueError(
             "Отсутствуют обязательные секции нормативной базы для генерации: "
             f"{'; '.join(missing)}. "
             "Сначала обнови parsing.py / registry.py и пересобери data/parsed/*.json."
+        )
+    if shortened_notes:
+        logging.warning(
+            "%s: нормативный контекст сокращён (%s)",
+            doc_spec.get("id", "unknown"),
+            "; ".join(shortened_notes),
         )
 
     return "\n".join(lines)
@@ -316,6 +367,12 @@ def load_ids_from_file(path: str) -> set[str]:
 def main() -> None:
     args = parse_args()
     setup_logging(args.log_level)
+
+    validation_errors = validate_pipeline_config(config, PARSED_DIR)
+    if validation_errors:
+        for error in validation_errors:
+            logging.error("CONFIG: %s", error)
+        sys.exit(1)
 
     if args.force:
         target_ids: set[str] | None = None

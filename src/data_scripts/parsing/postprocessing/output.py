@@ -20,6 +20,7 @@ import json
 import logging
 import re
 from pathlib import Path
+from datetime import datetime, timezone
 
 from db_logging.log_utils import log_alias
 from parsers.base import Section
@@ -30,7 +31,7 @@ logger = logging.getLogger(__name__)
 # Уплощение дерева секций
 # ---------------------------------------------------------------------------
 
-def flatten_sections(sections: list[Section]) -> dict[str, dict]:
+def flatten_sections(sections: list[Section], *, doc_id: str) -> dict[str, dict]:
     """Рекурсивно строит плоский словарь из дерева секций.
 
     Дочерние секции (пункты внутри глав) тоже попадают в индекс,
@@ -38,10 +39,53 @@ def flatten_sections(sections: list[Section]) -> dict[str, dict]:
     """
     result: dict[str, dict] = {}
     for sec in sections:
+        if sec.id in result:
+            raise ValueError(f"{doc_id}: duplicate section_id in flat index: {sec.id}")
         result[sec.id] = {"title": sec.title, "text": sec.text}
         if sec.children:
-            result.update(flatten_sections(sec.children))
+            child_flat = flatten_sections(sec.children, doc_id=doc_id)
+            duplicate_ids = sorted(set(result).intersection(child_flat))
+            if duplicate_ids:
+                raise ValueError(
+                    f"{doc_id}: duplicate section_id in flat index: {', '.join(duplicate_ids)}"
+                )
+            result.update(child_flat)
     return result
+
+
+def _build_sections_tree(
+    doc_id: str,
+    sections: list[Section],
+) -> dict:
+    """Строит иерархическое представление секций с метаданными для chunking/retrieval."""
+    order_counter = {"value": 0}
+
+    def _walk(sec: Section, parent_id: str | None, parent_path: list[str], level: int) -> dict:
+        order_counter["value"] += 1
+        current_path = [*parent_path, sec.id]
+        children_nodes = [
+            _walk(child, sec.id, current_path, level + 1)
+            for child in sec.children
+        ]
+        return {
+            "doc_id": doc_id,
+            "section_id": sec.id,
+            "parent_section_id": parent_id,
+            "level": level,
+            "order": order_counter["value"],
+            "path": current_path,
+            "title": sec.title,
+            "text": sec.text,
+            "char_count": len(sec.text),
+            "is_leaf": len(sec.children) == 0,
+            "children": children_nodes,
+        }
+
+    return {
+        "doc_id": doc_id,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "sections": [_walk(sec, None, [], 1) for sec in sections],
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -208,8 +252,8 @@ def save_sections(
     op_id: str | None = None,
     run_log: object = None,
 ) -> Path:
-    """Сохраняет секции в {doc_id}_sections.json."""
-    flat = flatten_sections(sections)
+    """Сохраняет секции в legacy flat-формате + flat/tree для structured chunking."""
+    flat = flatten_sections(sections, doc_id=doc_id)
 
     if wanted_ids:
         flat = resolve_aliases(
@@ -220,14 +264,26 @@ def save_sections(
         )
 
     output_dir.mkdir(parents=True, exist_ok=True)
-    path = output_dir / f"{doc_id}_sections.json"
-    path.write_text(
+    # Legacy flat: используется текущим generating.py
+    legacy_path = output_dir / f"{doc_id}_sections.json"
+    legacy_path.write_text(
         json.dumps(flat, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
 
-    logger.info(
-        "Сохранено: %s (%d секций, %d байт)",
-        path.name, len(flat), path.stat().st_size,
+    # Иерархический формат для document-structured chunking и parent-child retrieval.
+    tree_payload = _build_sections_tree(
+        doc_id,
+        sections,
     )
-    return path
+    tree_path = output_dir / f"{doc_id}_sections_tree.json"
+    tree_path.write_text(
+        json.dumps(tree_payload, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+    logger.info(
+        "Сохранено: %s, %s (%d flat-секций)",
+        legacy_path.name, tree_path.name, len(flat),
+    )
+    return legacy_path

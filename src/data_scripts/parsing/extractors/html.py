@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import logging
 import re
+from datetime import date, datetime
 
 from bs4 import BeautifulSoup, Tag
 
@@ -73,6 +74,106 @@ def _find_first(soup: BeautifulSoup, selectors: list[str]) -> Tag | None:
     return None
 
 
+_RU_MONTHS = {
+    "января": 1,
+    "февраля": 2,
+    "марта": 3,
+    "апреля": 4,
+    "мая": 5,
+    "июня": 6,
+    "июля": 7,
+    "августа": 8,
+    "сентября": 9,
+    "октября": 10,
+    "ноября": 11,
+    "декабря": 12,
+}
+
+_DATE_NUMERIC_RE = re.compile(r"\b(\d{1,2})[./](\d{1,2})[./](\d{4})\b")
+_DATE_TEXTUAL_RE = re.compile(
+    r"\b(\d{1,2})\s+("
+    + "|".join(_RU_MONTHS.keys())
+    + r")\s+(\d{4})\s*(?:г\.|года)?\b",
+    flags=re.IGNORECASE,
+)
+_REVISION_CONTEXT_RE = re.compile(
+    r"(дата\s+последней\s+редакции|последн(?:яя|ей)\s+редакц(?:ия|ии)|ред(?:акц(?:ия|ии))?\s*от|с\s+изменениями\s+и\s+дополнениями\s+от)",
+    flags=re.IGNORECASE,
+)
+
+
+def _normalize_ru_date(raw: str) -> str | None:
+    val = raw.strip().lower()
+    m_num = _DATE_NUMERIC_RE.search(val)
+    if m_num:
+        day, month, year = map(int, m_num.groups())
+        try:
+            return date(year, month, day).isoformat()
+        except ValueError:
+            return None
+
+    m_txt = _DATE_TEXTUAL_RE.search(val)
+    if not m_txt:
+        return None
+
+    day = int(m_txt.group(1))
+    month_name = m_txt.group(2).lower()
+    year = int(m_txt.group(3))
+    month = _RU_MONTHS.get(month_name)
+    if not month:
+        return None
+    try:
+        return date(year, month, day).isoformat()
+    except ValueError:
+        return None
+
+
+def _extract_dates_from_text(text: str) -> list[str]:
+    candidates: list[str] = []
+    for m in _DATE_NUMERIC_RE.finditer(text):
+        norm = _normalize_ru_date(m.group(0))
+        if norm:
+            candidates.append(norm)
+    for m in _DATE_TEXTUAL_RE.finditer(text):
+        norm = _normalize_ru_date(m.group(0))
+        if norm:
+            candidates.append(norm)
+    return candidates
+
+
+def extract_garant_last_revision_date(soup: BeautifulSoup) -> str | None:
+    """Extract last revision date from garant/base.garant page as ISO YYYY-MM-DD."""
+    sources: list[str] = []
+    title = soup.title.get_text(" ", strip=True) if soup.title else ""
+    if title:
+        sources.append(title)
+    for meta_name in ("description", "keywords"):
+        meta = soup.find("meta", attrs={"name": meta_name})
+        if meta and isinstance(meta, Tag):
+            content = (meta.get("content") or "").strip()
+            if content:
+                sources.append(content)
+    sources.append(soup.get_text(" ", strip=True))
+
+    dated_contexts: list[str] = []
+    for src in sources:
+        for m in _REVISION_CONTEXT_RE.finditer(src):
+            window = src[max(0, m.start() - 60): min(len(src), m.end() + 220)]
+            dated_contexts.append(window)
+
+    context_dates: list[str] = []
+    for ctx in dated_contexts:
+        context_dates.extend(_extract_dates_from_text(ctx))
+
+    if not context_dates:
+        return None
+
+    today = datetime.now().date().isoformat()
+    not_future = [d for d in context_dates if d <= today]
+    pool = not_future or context_dates
+    return max(pool)
+
+
 # ---------------------------------------------------------------------------
 # Экстракторы
 # ---------------------------------------------------------------------------
@@ -85,6 +186,8 @@ class ConsultantExtractor(AbstractExtractor):
     """
 
     _CONTENT_SELECTORS = [
+        "div.document-page__content",
+        "div.content.document-page",
         "div.document",
         "div.DocumentMainPart",
         "div#content",
@@ -128,6 +231,53 @@ class ConsultantExtractor(AbstractExtractor):
 
         text = _tag_to_text(container)
         logger.debug("ConsultantExtractor: %d символов, URL=%s", len(text), url)
+        return RawDocument(text=text, source_url=url, title=title)
+
+
+class KonturExtractor(AbstractExtractor):
+    """Извлекает текст документа с normativ.kontur.ru."""
+
+    _CONTENT_SELECTORS = [
+        "div#js-doc-text",
+        "div.doc_text",
+        "div#js-doc-container",
+        "div.doc_container",
+        "div#js-doc-frame-container",
+    ]
+    _NOISE_SELECTORS = [
+        "script",
+        "style",
+        "nav",
+        "header",
+        "footer",
+        ".sidebar-block",
+        ".doc_toolbar",
+        ".doc_titlebar-toggle",
+        ".doc_frame-scroll-shadow",
+    ]
+
+    def extract(self, raw_bytes: bytes, url: str) -> RawDocument:
+        if _check_pdf_magic(raw_bytes):
+            from extractors.pdf import PyMuPDFExtractor
+            return PyMuPDFExtractor().extract(raw_bytes, url)
+
+        soup = _soup(raw_bytes)
+
+        for noise in soup.select(", ".join(self._NOISE_SELECTORS)):
+            noise.decompose()
+
+        container = _find_first(soup, self._CONTENT_SELECTORS)
+        if not container:
+            raise ValueError(f"KonturExtractor: контейнер документа не найден на {url}")
+
+        title_tag = soup.select_one("h1.doc_titlebar-title")
+        title = title_tag.get_text(strip=True) if title_tag else None
+
+        raw_text = container.get_text(separator="\n")
+        lines = [re.sub(r"[ \t]+", " ", line).strip() for line in raw_text.splitlines()]
+        text = "\n".join(line for line in lines if line)
+        text = re.sub(r"\n{3,}", "\n\n", text).strip()
+        logger.debug("KonturExtractor: %d символов, URL=%s", len(text), url)
         return RawDocument(text=text, source_url=url, title=title)
 
 
@@ -253,7 +403,10 @@ class GarantExtractor(AbstractExtractor):
             )
 
         logger.debug("GarantExtractor: %d символов, URL=%s", len(text), url)
-        return RawDocument(text=text, source_url=url)
+        return RawDocument(
+            text=text,
+            source_url=url,
+        )
 
 
 class CNTDExtractor(AbstractExtractor):

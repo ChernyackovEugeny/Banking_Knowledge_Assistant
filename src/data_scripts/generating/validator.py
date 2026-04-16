@@ -24,6 +24,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from dotenv import load_dotenv
+from config_validation import validate_pipeline_config
 
 # ---------------------------------------------------------------------------
 # Настройка путей
@@ -40,6 +41,7 @@ CONFIG_PATH = ROOT_DIR / "public" / "config.yaml"
 GENERATED_DIR = ROOT_DIR / "data" / "generated"
 QUESTIONS_DIR = ROOT_DIR / "data" / "questions"
 REPORT_PATH = ROOT_DIR / "data" / "validation_report.json"
+PARSED_DIR = ROOT_DIR / "data" / "parsed"
 
 from db_logging.run_logger import RunLogger   # noqa: E402
 from db_logging.log_utils import log_check    # noqa: E402
@@ -399,6 +401,12 @@ def main() -> None:
     setup_logging(args.log_level)
 
     config = _load_config()
+    validation_errors = validate_pipeline_config(config, PARSED_DIR)
+    if validation_errors:
+        for error in validation_errors:
+            logging.error("CONFIG: %s", error)
+        sys.exit(1)
+
     docs_by_id = {doc["id"]: doc for doc in config["documents"]}
     generation_order = config["pipeline"]["generation_order"]
     required_sections = config.get("document_template", {}).get("sections", [])

@@ -25,6 +25,7 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 from openai import OpenAI
+from config_validation import validate_pipeline_config
 
 # ---------------------------------------------------------------------------
 # Настройка путей
@@ -40,6 +41,7 @@ load_dotenv(dotenv_path=ROOT_DIR / ".env")
 CONFIG_PATH = ROOT_DIR / "public" / "config.yaml"
 GENERATED_DIR = ROOT_DIR / "data" / "generated"
 QUESTIONS_DIR = ROOT_DIR / "data" / "questions"
+PARSED_DIR = ROOT_DIR / "data" / "parsed"
 
 from db_logging.run_logger import RunLogger           # noqa: E402
 from db_logging.log_utils import log_llm_ok, log_llm_error  # noqa: E402
@@ -339,6 +341,12 @@ def main() -> None:
 
     args = parse_args(default_count=default_count)
     setup_logging(args.log_level)
+
+    validation_errors = validate_pipeline_config(config, PARSED_DIR)
+    if validation_errors:
+        for error in validation_errors:
+            logging.error("CONFIG: %s", error)
+        sys.exit(1)
 
     client = OpenAI(
         api_key=os.getenv("DEEPSEEK_API_KEY"),

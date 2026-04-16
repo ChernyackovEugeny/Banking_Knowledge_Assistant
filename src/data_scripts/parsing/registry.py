@@ -38,6 +38,7 @@ from extractors.html import (
     CNTDExtractor,
     ConsultantExtractor,
     GarantExtractor,
+    KonturExtractor,
     PravoGovExtractor,
 )
 from extractors.pdf import PyMuPDFExtractor
@@ -73,20 +74,36 @@ SOURCES: dict[str, list[SourceSpec]] = {
 
     # -------------------------------------------------------------------------
     # 39-ФЗ — О рынке ценных бумаг
-    # consultant.ru/document/cons_doc_LAW_10148/ — работает
+    # base.garant.ru/10106807/ — ФЗ от 22.04.1996 № 39-ФЗ; нужен для Playwright ID
+    # consultant.ru — JS-рендеринг, может не отдать текст
+    # NB: без подписки garant возвращает только оглавление (~5–6 кБ).
+    #     При неудаче: data/manual_pdfs/39-FZ.odt (скачать авторизованным ODT с garant.ru)
     # -------------------------------------------------------------------------
     "39-FZ": [
         SourceSpec(
-            "https://www.consultant.ru/document/cons_doc_LAW_10148/",
-            ConsultantExtractor,
+            "https://normativ.kontur.ru/document?documentId=505599&moduleId=1",
+            KonturExtractor,
+        ),
+        SourceSpec(
+            "https://base.garant.ru/10106807/",
+            GarantExtractor,
         ),
     ],
 
     # -------------------------------------------------------------------------
     # 152-ФЗ — О персональных данных
-    # consultant.ru/document/cons_doc_LAW_61801/ — работает
+    # base.garant.ru/12148567/ — ФЗ от 27.07.2006 № 152-ФЗ, полный текст
+    # consultant.ru — JS-рендеринг, может не отдать текст → fallback
     # -------------------------------------------------------------------------
     "152-FZ": [
+        SourceSpec(
+            "https://base.garant.ru/12148567/",
+            GarantExtractor,
+        ),
+        SourceSpec(
+            "https://www.garant.ru/products/ipo/prime/doc/12048567/",
+            GarantExtractor,
+        ),
         SourceSpec(
             "https://www.consultant.ru/document/cons_doc_LAW_61801/",
             ConsultantExtractor,
@@ -137,17 +154,19 @@ SOURCES: dict[str, list[SourceSpec]] = {
 
     # -------------------------------------------------------------------------
     # 499-П — Об идентификации клиентов (2015, ред. 2024)
-    # base.garant.ru не найден отдельно, но ПРАЙМ-версия доступна
-    # NB: текст на garant может быть неполным → fallback на ручной PDF
+    # base.garant.ru (71255014) — нужен для Playwright ID; HTTP: TOC без подписки
+    # consultant.ru — JS-рендеринг → обычно заблокирован
+    # NB: документ за пэйволлом garant, Playwright не скачивает ODT для него.
+    #     При неудаче: data/manual_pdfs/499-P.odt (скачать авторизованным ODT с garant.ru)
     # -------------------------------------------------------------------------
     "499-P": [
         SourceSpec(
-            "https://base.garant.ru/71255014/",
-            GarantExtractor,
+            "https://normativ.kontur.ru/document?documentId=449792&moduleId=1",
+            KonturExtractor,
         ),
         SourceSpec(
-            "https://www.consultant.ru/document/cons_doc_LAW_190099/",
-            ConsultantExtractor,
+            "https://base.garant.ru/71255014/",
+            GarantExtractor,
         ),
     ],
 
@@ -221,15 +240,20 @@ SOURCES: dict[str, list[SourceSpec]] = {
 
     # -------------------------------------------------------------------------
     # 611-П — О порядке формирования резервов на возможные потери (2017)
-    # Полный текст на base.garant, ПРАЙМ, consultant, docs.cntd.
+    # ПРАЙМ (71801656) — полный текст с пунктами; ставим первым для HTTP-цепочки
+    # base.garant.ru (71901656) — частичный текст (только главы); нужен для Playwright ID
+    # consultant.ru — JS-рендеринг → обычно заблокирован
+    # docs.cntd.ru — резервный, timeout бывает
+    # NB: Playwright извлекает ID только из base.garant.ru, поэтому порядок
+    #     источников не влияет на Playwright — он всегда использует 71901656.
     # -------------------------------------------------------------------------
     "611-P": [
         SourceSpec(
-            "https://base.garant.ru/71901656/",
+            "https://www.garant.ru/products/ipo/prime/doc/71801656/",
             GarantExtractor,
         ),
         SourceSpec(
-            "https://www.garant.ru/products/ipo/prime/doc/71801656/",
+            "https://base.garant.ru/71901656/",
             GarantExtractor,
         ),
         SourceSpec(
@@ -335,12 +359,15 @@ SOURCES: dict[str, list[SourceSpec]] = {
 
     # -------------------------------------------------------------------------
     # 579-П — О Плане счетов бухгалтерского учёта (2017)
-    # Полный текст на consultant (большой документ с приложениями).
+    # consultant.ru — JS-рендеринг, обычно заблокирован
+    # base.garant.ru (71645626) — нужен для Playwright ID; HTTP: TOC без подписки
+    # NB: очень большой документ с таблицами. Playwright не скачивает ODT.
+    #     При неудаче: data/manual_pdfs/579-P.odt (скачать авторизованным ODT с garant.ru)
     # -------------------------------------------------------------------------
     "579-P": [
         SourceSpec(
-            "https://www.consultant.ru/document/cons_doc_LAW_213488/",
-            ConsultantExtractor,
+            "https://normativ.kontur.ru/document?documentId=430142&moduleId=1",
+            KonturExtractor,
         ),
         SourceSpec(
             "https://base.garant.ru/71645626/",
