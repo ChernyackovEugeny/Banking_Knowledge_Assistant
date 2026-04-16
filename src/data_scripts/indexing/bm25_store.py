@@ -15,11 +15,23 @@ import json
 import logging
 import pickle
 import re
+import inspect
 from datetime import datetime, timezone
 from functools import lru_cache
 from pathlib import Path
+from collections import namedtuple
 
 logger = logging.getLogger(__name__)
+
+# Совместимость с pymorphy2 на Python 3.11+: библиотека вызывает removed inspect.getargspec.
+if not hasattr(inspect, "getargspec"):
+    ArgSpec = namedtuple("ArgSpec", ["args", "varargs", "keywords", "defaults"])
+
+    def _getargspec_compat(func):
+        spec = inspect.getfullargspec(func)
+        return ArgSpec(spec.args, spec.varargs, spec.varkw, spec.defaults)
+
+    inspect.getargspec = _getargspec_compat  # type: ignore[attr-defined]
 
 # ---------------------------------------------------------------------------
 # Токенизатор (инициализируется лениво)

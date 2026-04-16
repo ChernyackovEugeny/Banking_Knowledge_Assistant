@@ -1,0 +1,466 @@
+﻿"""Dashboard API вЂ” Р°РЅР°Р»РёС‚РёС‡РµСЃРєРёРµ СЌРЅРґРїРѕРёРЅС‚С‹ РґР»СЏ РїСЂРѕСЃРјРѕС‚СЂР° Р»РѕРіРѕРІ PostgreSQL.
+
+Р­РЅРґРїРѕРёРЅС‚С‹ СЃРёРЅС…СЂРѕРЅРЅС‹Рµ (FastAPI Р°РІС‚РѕРјР°С‚РёС‡РµСЃРєРё Р·Р°РїСѓСЃРєР°РµС‚ РёС… РІ thread pool).
+РљР°Р¶РґС‹Р№ Р·Р°РїСЂРѕСЃ РѕС‚РєСЂС‹РІР°РµС‚ РѕС‚РґРµР»СЊРЅРѕРµ РєРѕСЂРѕС‚РєРѕРµ СЃРѕРµРґРёРЅРµРЅРёРµ СЃ PostgreSQL.
+РџСЂРё РѕС‚СЃСѓС‚СЃС‚РІРёРё С‚Р°Р±Р»РёС† РёР»Рё РЅРµРґРѕСЃС‚СѓРїРЅРѕСЃС‚Рё Р‘Р” РІРѕР·РІСЂР°С‰Р°РµС‚ РїСѓСЃС‚С‹Рµ РґР°РЅРЅС‹Рµ вЂ” РґСЌС€Р±РѕСЂРґ
+РЅРµ Р»РѕРјР°РµС‚ СЂР°Р±РѕС‚Сѓ API РґР°Р¶Рµ Р±РµР· Р·Р°РїСѓС‰РµРЅРЅРѕРіРѕ Docker.
+
+РњР°СЂС€СЂСѓС‚С‹:
+    GET /api/dashboard/overview            вЂ” KPI-РјРµС‚СЂРёРєРё Р·Р° 24 С‡Р°СЃР°
+    GET /api/dashboard/chat/timeline       вЂ” Р·Р°РїСЂРѕСЃС‹ РїРѕ С‡Р°СЃР°Рј (24h)
+    GET /api/dashboard/chat/tokens         вЂ” С‚РѕРєРµРЅС‹ РїРѕ РґРЅСЏРј (14d)
+    GET /api/dashboard/chat/recent         вЂ” РїРѕСЃР»РµРґРЅРёРµ 20 Р·Р°РїСЂРѕСЃРѕРІ
+    GET /api/dashboard/chat/anomalies      вЂ” Р·Р°РІРёСЃС€РёРµ / РјРµРґР»РµРЅРЅС‹Рµ / РїСЂРѕР±Р»РµРјРЅС‹Рµ СЃРµСЃСЃРёРё
+    GET /api/dashboard/chat/docs           вЂ” С‚РѕРї РґРѕРєСѓРјРµРЅС‚РѕРІ РІ РєРѕРЅС‚РµРєСЃС‚Рµ LLM
+    GET /api/dashboard/pipeline            вЂ” Р·Р°РїСѓСЃРєРё parse_ Рё gen_ РїР°Р№РїР»Р°Р№РЅРѕРІ
+"""
+from __future__ import annotations
+
+import os
+from contextlib import contextmanager
+from datetime import datetime, date
+from pathlib import Path
+from typing import Any
+
+from dotenv import load_dotenv
+from fastapi import APIRouter
+
+load_dotenv(dotenv_path=Path(__file__).resolve().parents[3] / ".env")
+
+router = APIRouter(prefix="/api/dashboard", tags=["dashboard"])
+
+
+# ---------------------------------------------------------------------------
+# DB helpers
+# ---------------------------------------------------------------------------
+
+def _db_params() -> dict:
+    return {
+        "host":     os.getenv("POSTGRES_HOST", "localhost"),
+        "port":     int(os.getenv("POSTGRES_PORT", "5432")),
+        "dbname":   os.getenv("POSTGRES_DB", "banking_assistant"),
+        "user":     os.getenv("POSTGRES_USER", "banking_user"),
+        "password": os.getenv("POSTGRES_PASSWORD", "changeme"),
+    }
+
+
+@contextmanager
+def _cursor():
+    """РћС‚РєСЂС‹РІР°РµС‚ СЃРѕРµРґРёРЅРµРЅРёРµ, РѕС‚РґР°С‘С‚ RealDictCursor, Р·Р°РєСЂС‹РІР°РµС‚ РїСЂРё РІС‹С…РѕРґРµ."""
+    import psycopg2
+    from psycopg2.extras import RealDictCursor
+    conn = psycopg2.connect(**_db_params())
+    conn.autocommit = True
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            yield cur
+    finally:
+        conn.close()
+
+
+def _safe(v, cast=None, default=None):
+    """Р‘РµР·РѕРїР°СЃРЅРѕРµ РїСЂРёРІРµРґРµРЅРёРµ С‚РёРїР° СЃ РґРµС„РѕР»С‚РѕРј РїСЂРё None."""
+    if v is None:
+        return default
+    try:
+        return cast(v) if cast else v
+    except (TypeError, ValueError):
+        return default
+
+
+def _dt(v) -> str | None:
+    """datetime/date в†’ ISO-СЃС‚СЂРѕРєР° РґР»СЏ JSON."""
+    if isinstance(v, (datetime, date)):
+        return v.isoformat()
+    return v
+
+
+def _serialize_rows(rows) -> list[dict]:
+    return [
+        {k: _dt(v) for k, v in dict(r).items()}
+        for r in (rows or [])
+    ]
+
+
+# ---------------------------------------------------------------------------
+# GET /api/dashboard/overview
+# ---------------------------------------------------------------------------
+
+@router.get("/overview")
+def get_overview() -> dict[str, Any]:
+    """РљР»СЋС‡РµРІС‹Рµ РјРµС‚СЂРёРєРё Р·Р° РїРѕСЃР»РµРґРЅРёРµ 24 С‡Р°СЃР°."""
+    defaults: dict[str, Any] = {
+        "total_requests": 0, "ok_count": 0, "error_count": 0,
+        "in_progress_count": 0, "avg_latency_ms": None, "p95_latency_ms": None,
+        "total_tokens_24h": 0, "active_sessions_24h": 0, "stuck_count": 0,
+    }
+    try:
+        with _cursor() as cur:
+            cur.execute("""
+                SELECT
+                    COUNT(*)                                                       AS total_requests,
+                    SUM(CASE WHEN status = 'ok'          THEN 1 ELSE 0 END)       AS ok_count,
+                    SUM(CASE WHEN status = 'error'       THEN 1 ELSE 0 END)       AS error_count,
+                    SUM(CASE WHEN status = 'in_progress' THEN 1 ELSE 0 END)       AS in_progress_count,
+                    AVG(CASE WHEN status = 'ok' THEN total_duration_ms END)       AS avg_latency_ms,
+                    PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY total_duration_ms)
+                        FILTER (WHERE status = 'ok')                              AS p95_latency_ms
+                FROM chat_requests
+                WHERE requested_at >= NOW() - INTERVAL '24 hours'
+            """)
+            row = cur.fetchone() or {}
+
+            cur.execute("""
+                SELECT COUNT(DISTINCT session_id) AS active_sessions
+                FROM chat_requests
+                WHERE requested_at >= NOW() - INTERVAL '24 hours'
+            """)
+            sess = cur.fetchone() or {}
+
+            cur.execute("""
+                SELECT COALESCE(SUM(total_tokens), 0) AS total_tokens
+                FROM chat_llm_calls
+                WHERE called_at >= NOW() - INTERVAL '24 hours' AND status = 'ok'
+            """)
+            tok = cur.fetchone() or {}
+
+            cur.execute("""
+                SELECT COUNT(*) AS stuck_count
+                FROM chat_requests
+                WHERE status = 'in_progress'
+                  AND requested_at < NOW() - INTERVAL '5 minutes'
+            """)
+            stuck = cur.fetchone() or {}
+
+            return {
+                "total_requests":      _safe(row.get("total_requests"), int, 0),
+                "ok_count":            _safe(row.get("ok_count"), int, 0),
+                "error_count":         _safe(row.get("error_count"), int, 0),
+                "in_progress_count":   _safe(row.get("in_progress_count"), int, 0),
+                "avg_latency_ms":      _safe(row.get("avg_latency_ms"), float),
+                "p95_latency_ms":      _safe(row.get("p95_latency_ms"), float),
+                "total_tokens_24h":    _safe(tok.get("total_tokens"), int, 0),
+                "active_sessions_24h": _safe(sess.get("active_sessions"), int, 0),
+                "stuck_count":         _safe(stuck.get("stuck_count"), int, 0),
+            }
+    except Exception:
+        return defaults
+
+
+# ---------------------------------------------------------------------------
+# GET /api/dashboard/chat/timeline
+# ---------------------------------------------------------------------------
+
+@router.get("/chat/timeline")
+def get_chat_timeline(hours: int = 24) -> list[dict]:
+    """Р—Р°РїСЂРѕСЃС‹ РїРѕ С‡Р°СЃР°Рј Р·Р° РїРѕСЃР»РµРґРЅРёРµ N С‡Р°СЃРѕРІ (РґР»СЏ LineChart)."""
+    try:
+        with _cursor() as cur:
+            cur.execute("""
+                SELECT
+                    DATE_TRUNC('hour', requested_at)                              AS hour,
+                    COUNT(*)                                                       AS total,
+                    SUM(CASE WHEN status = 'error' THEN 1 ELSE 0 END)            AS errors
+                FROM chat_requests
+                WHERE requested_at >= NOW() - INTERVAL '1 hour' * %s
+                GROUP BY 1
+                ORDER BY 1
+            """, (hours,))
+            return [
+                {
+                    "hour":   r["hour"].strftime("%H:%M") if r.get("hour") else "",
+                    "total":  _safe(r.get("total"), int, 0),
+                    "errors": _safe(r.get("errors"), int, 0),
+                }
+                for r in (cur.fetchall() or [])
+            ]
+    except Exception:
+        return []
+
+
+# ---------------------------------------------------------------------------
+# GET /api/dashboard/chat/tokens
+# ---------------------------------------------------------------------------
+
+@router.get("/chat/tokens")
+def get_tokens_timeline(days: int = 14) -> list[dict]:
+    """Р Р°СЃС…РѕРґ С‚РѕРєРµРЅРѕРІ РїРѕ РґРЅСЏРј Р·Р° РїРѕСЃР»РµРґРЅРёРµ N РґРЅРµР№ (РґР»СЏ BarChart)."""
+    try:
+        with _cursor() as cur:
+            cur.execute("""
+                SELECT
+                    DATE_TRUNC('day', called_at)::date                            AS day,
+                    COALESCE(SUM(total_tokens), 0)                                AS total_tokens,
+                    COALESCE(SUM(prompt_tokens), 0)                               AS prompt_tokens,
+                    COALESCE(SUM(completion_tokens), 0)                           AS completion_tokens,
+                    COUNT(*)                                                       AS calls
+                FROM chat_llm_calls
+                WHERE called_at >= NOW() - INTERVAL '1 day' * %s AND status = 'ok'
+                GROUP BY 1
+                ORDER BY 1
+            """, (days,))
+            return [
+                {
+                    "day":               r["day"].isoformat() if r.get("day") else "",
+                    "total_tokens":      _safe(r.get("total_tokens"), int, 0),
+                    "prompt_tokens":     _safe(r.get("prompt_tokens"), int, 0),
+                    "completion_tokens": _safe(r.get("completion_tokens"), int, 0),
+                    "calls":             _safe(r.get("calls"), int, 0),
+                }
+                for r in (cur.fetchall() or [])
+            ]
+    except Exception:
+        return []
+
+
+# ---------------------------------------------------------------------------
+# GET /api/dashboard/chat/recent
+# ---------------------------------------------------------------------------
+
+@router.get("/chat/recent")
+def get_recent_requests(limit: int = 20) -> list[dict]:
+    """РџРѕСЃР»РµРґРЅРёРµ N Р·Р°РїСЂРѕСЃРѕРІ СЃ РїСЂРµРІСЊСЋ Р·Р°РїСЂРѕСЃР° Рё РјРµС‚СЂРёРєР°РјРё."""
+    try:
+        with _cursor() as cur:
+            cur.execute("""
+                SELECT
+                    r.request_id,
+                    LEFT(r.session_id, 8)                                         AS session_short,
+                    LEFT(r.query_text, 120)                                       AS query_preview,
+                    r.status,
+                    r.total_duration_ms,
+                    l.total_tokens,
+                    r.retrieved_chunks_n,
+                    r.requested_at,
+                    r.error_msg
+                FROM chat_requests r
+                LEFT JOIN chat_llm_calls l ON l.request_id = r.request_id
+                ORDER BY r.requested_at DESC
+                LIMIT %s
+            """, (limit,))
+            return [
+                {
+                    "request_id":        r["request_id"],
+                    "session_short":     r["session_short"],
+                    "query_preview":     r["query_preview"],
+                    "status":            r["status"],
+                    "total_duration_ms": _safe(r.get("total_duration_ms"), float),
+                    "total_tokens":      _safe(r.get("total_tokens"), int),
+                    "retrieved_chunks_n": _safe(r.get("retrieved_chunks_n"), int),
+                    "requested_at":      _dt(r.get("requested_at")),
+                    "error_msg":         r.get("error_msg"),
+                }
+                for r in (cur.fetchall() or [])
+            ]
+    except Exception:
+        return []
+
+
+# ---------------------------------------------------------------------------
+# GET /api/dashboard/chat/anomalies
+# ---------------------------------------------------------------------------
+
+@router.get("/chat/anomalies")
+def get_anomalies() -> dict[str, list]:
+    """РђРЅРѕРјР°Р»РёРё: Р·Р°РІРёСЃС€РёРµ Р·Р°РїСЂРѕСЃС‹, РјРµРґР»РµРЅРЅС‹Рµ РѕС‚РІРµС‚С‹, РїСЂРѕР±Р»РµРјРЅС‹Рµ СЃРµСЃСЃРёРё."""
+    defaults: dict[str, list] = {"stuck": [], "slow": [], "error_sessions": []}
+    try:
+        with _cursor() as cur:
+            # Р—Р°РІРёСЃС€РёРµ (in_progress > 5 РјРёРЅСѓС‚)
+            cur.execute("""
+                SELECT
+                    request_id,
+                    LEFT(session_id, 8)                                           AS session_short,
+                    LEFT(query_text, 80)                                          AS query,
+                    ROUND(EXTRACT(EPOCH FROM (NOW() - requested_at)) / 60.0, 1)  AS minutes_ago
+                FROM chat_requests
+                WHERE status = 'in_progress'
+                  AND requested_at < NOW() - INTERVAL '5 minutes'
+                ORDER BY requested_at
+                LIMIT 10
+            """)
+            stuck = [
+                {**dict(r), "minutes_ago": float(r.get("minutes_ago") or 0)}
+                for r in (cur.fetchall() or [])
+            ]
+
+            # РњРµРґР»РµРЅРЅС‹Рµ РѕС‚РІРµС‚С‹ (> 30 СЃРµРє, РїРѕСЃР»РµРґРЅРёРµ 24С‡)
+            cur.execute("""
+                SELECT
+                    request_id,
+                    LEFT(session_id, 8)                                           AS session_short,
+                    LEFT(query_text, 80)                                          AS query,
+                    total_duration_ms
+                FROM chat_requests
+                WHERE total_duration_ms > 30000
+                  AND requested_at >= NOW() - INTERVAL '24 hours'
+                  AND status = 'ok'
+                ORDER BY total_duration_ms DESC
+                LIMIT 10
+            """)
+            slow = [
+                {**dict(r), "total_duration_ms": float(r.get("total_duration_ms") or 0)}
+                for r in (cur.fetchall() or [])
+            ]
+
+            # РџСЂРѕР±Р»РµРјРЅС‹Рµ СЃРµСЃСЃРёРё (РµСЃС‚СЊ РѕС€РёР±РєРё)
+            cur.execute("""
+                SELECT
+                    LEFT(session_id, 8)                                           AS session_short,
+                    session_id,
+                    request_count,
+                    error_count,
+                    ROUND(100.0 * error_count / NULLIF(request_count, 0), 1)     AS error_pct
+                FROM chat_sessions
+                WHERE error_count > 0
+                ORDER BY error_pct DESC, request_count DESC
+                LIMIT 10
+            """)
+            error_sessions = [
+                {**dict(r), "error_pct": float(r.get("error_pct") or 0)}
+                for r in (cur.fetchall() or [])
+            ]
+
+            return {"stuck": stuck, "slow": slow, "error_sessions": error_sessions}
+    except Exception:
+        return defaults
+
+
+# ---------------------------------------------------------------------------
+# GET /api/dashboard/chat/docs
+# ---------------------------------------------------------------------------
+
+@router.get("/chat/docs")
+def get_top_docs(limit: int = 10) -> list[dict]:
+    """РўРѕРї РґРѕРєСѓРјРµРЅС‚РѕРІ РїРѕ С‡Р°СЃС‚РѕС‚Рµ РїРѕРїР°РґР°РЅРёСЏ РІ РєРѕРЅС‚РµРєСЃС‚ LLM."""
+    try:
+        with _cursor() as cur:
+            cur.execute("""
+                SELECT
+                    doc_id,
+                    COUNT(*)                            AS appearances,
+                    COUNT(DISTINCT request_id)          AS unique_requests,
+                    COALESCE(AVG(score), 0)             AS avg_score,
+                    ROUND(AVG(rank)::numeric, 1)        AS avg_rank
+                FROM chat_retrieved_chunks
+                GROUP BY doc_id
+                ORDER BY appearances DESC
+                LIMIT %s
+            """, (limit,))
+            return [
+                {
+                    "doc_id":          r["doc_id"],
+                    "appearances":     _safe(r.get("appearances"), int, 0),
+                    "unique_requests": _safe(r.get("unique_requests"), int, 0),
+                    "avg_score":       _safe(r.get("avg_score"), float, 0.0),
+                    "avg_rank":        _safe(r.get("avg_rank"), float, 0.0),
+                }
+                for r in (cur.fetchall() or [])
+            ]
+    except Exception:
+        return []
+
+
+# ---------------------------------------------------------------------------
+# GET /api/dashboard/pipeline
+# ---------------------------------------------------------------------------
+
+@router.get("/pipeline")
+def get_pipeline() -> dict[str, list]:
+    """РџРѕСЃР»РµРґРЅРёРµ Р·Р°РїСѓСЃРєРё РїР°Р№РїР»Р°Р№РЅРѕРІ РїР°СЂСЃРёРЅРіР° Рё РіРµРЅРµСЂР°С†РёРё, СЃРІРѕРґРєР° РІР°Р»РёРґР°С†РёРё."""
+    result: dict[str, list] = {
+        "parse_sessions": [],
+        "gen_sessions": [],
+        "validation_summary": [],
+    }
+
+    # Parse sessions
+    try:
+        with _cursor() as cur:
+            cur.execute("""
+                SELECT
+                    session_id,
+                    started_at,
+                    COALESCE(duration_sec, 0)     AS duration_sec,
+                    docs_total, docs_ok, docs_failed, docs_skipped,
+                    flag_force,
+                    flag_only_filter,
+                    (finished_at IS NULL)          AS is_running
+                FROM parse_sessions
+                ORDER BY started_at DESC
+                LIMIT 10
+            """)
+            result["parse_sessions"] = [
+                {
+                    **{k: v for k, v in dict(r).items() if not isinstance(v, (datetime, date))},
+                    "started_at":   _dt(r.get("started_at")),
+                    "duration_sec": float(r.get("duration_sec") or 0),
+                }
+                for r in (cur.fetchall() or [])
+            ]
+    except Exception:
+        pass
+
+    # Gen sessions
+    try:
+        with _cursor() as cur:
+            cur.execute("""
+                SELECT
+                    session_id,
+                    script_name,
+                    started_at,
+                    COALESCE(duration_sec, 0)     AS duration_sec,
+                    docs_total, docs_ok, docs_failed, docs_skipped,
+                    flag_force,
+                    (finished_at IS NULL)          AS is_running
+                FROM gen_sessions
+                ORDER BY started_at DESC
+                LIMIT 10
+            """)
+            result["gen_sessions"] = [
+                {
+                    **{k: v for k, v in dict(r).items() if not isinstance(v, (datetime, date))},
+                    "started_at":   _dt(r.get("started_at")),
+                    "duration_sec": float(r.get("duration_sec") or 0),
+                }
+                for r in (cur.fetchall() or [])
+            ]
+    except Exception:
+        pass
+
+    # Validation summary (РїРѕСЃР»РµРґРЅРёР№ Р·Р°РїСѓСЃРє validator.py)
+    try:
+        with _cursor() as cur:
+            cur.execute("""
+                WITH last_val AS (
+                    SELECT session_id FROM gen_sessions
+                    WHERE script_name = 'validator'
+                    ORDER BY started_at DESC LIMIT 1
+                )
+                SELECT
+                    r.check_name,
+                    r.artifact_type,
+                    COUNT(*)                                                       AS total,
+                    SUM(CASE WHEN r.passed THEN 1 ELSE 0 END)                    AS passed,
+                    ROUND(
+                        100.0 * SUM(CASE WHEN r.passed THEN 1 ELSE 0 END) / COUNT(*),
+                    1)                                                             AS pass_rate
+                FROM gen_validation_results r
+                JOIN last_val l ON l.session_id = r.session_id
+                GROUP BY r.check_name, r.artifact_type
+                ORDER BY r.artifact_type, pass_rate ASC
+            """)
+            result["validation_summary"] = [
+                {
+                    "check_name":    r["check_name"],
+                    "artifact_type": r["artifact_type"],
+                    "total":         _safe(r.get("total"), int, 0),
+                    "passed":        _safe(r.get("passed"), int, 0),
+                    "pass_rate":     _safe(r.get("pass_rate"), float, 0.0),
+                }
+                for r in (cur.fetchall() or [])
+            ]
+    except Exception:
+        pass
+
+    return result

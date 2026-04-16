@@ -214,3 +214,10 @@ data/fetch_cache/
 .claude
 
 data/
+
+inspect_parse_logs_db.py
+diagnose_garant.py
+
+CLAUDE.md
+node_modules
+
