@@ -1,5 +1,8 @@
 """Пайплайн индексации чанков в ChromaDB + BM25.
 
+ChromaDB работает как отдельный сервис в docker-compose (chromadb/chroma).
+Подключение по HTTP: CHROMA_HOST / CHROMA_PORT из .env.
+
 Читает data/chunks/{doc_id}_chunks.json (только is_indexed=True).
 Для каждого документа:
   1. Эмбеддит тексты через sbert_large_nlu_ru.
@@ -30,6 +33,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -47,9 +51,11 @@ if str(_THIS_DIR) not in sys.path:
 ROOT_DIR     = _THIS_DIR.parents[2]          # indexing/ → data_scripts/ → src/ → root
 CONFIG_PATH  = ROOT_DIR / "public" / "config.yaml"
 CHUNKS_DIR   = ROOT_DIR / "data" / "chunks"
-CHROMA_DIR   = ROOT_DIR / "data" / "chroma_db"
+# Векторы живут в контейнере chroma (docker-compose). Локально держим только
+# bookkeeping-файл индексатора, чтобы знать какие doc_id уже загружены.
+STATE_DIR    = ROOT_DIR / "data" / "chroma_db"
 BM25_DIR     = ROOT_DIR / "data" / "bm25_indexes"
-STATE_PATH   = CHROMA_DIR / "index_state.json"
+STATE_PATH   = STATE_DIR / "index_state.json"
 
 from chroma_store import ChromaStore, chunk_to_metadata  # noqa: E402
 from bm25_store import BM25Store                          # noqa: E402
@@ -96,7 +102,7 @@ def load_state() -> dict:
 
 
 def save_state(state: dict) -> None:
-    CHROMA_DIR.mkdir(parents=True, exist_ok=True)
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
     STATE_PATH.write_text(
         json.dumps(state, ensure_ascii=False, indent=2),
         encoding="utf-8",
@@ -310,9 +316,15 @@ def main() -> None:
     state = load_state()
 
     # Инициализация хранилищ
-    chroma   = None if args.skip_embeddings else ChromaStore(CHROMA_DIR)
-    embedder = None if args.skip_embeddings else Embedder()
-    bm25     = None if args.skip_bm25 else BM25Store(BM25_DIR)
+    if args.skip_embeddings:
+        chroma = None
+        embedder = None
+    else:
+        chroma_host = os.getenv("CHROMA_HOST", "localhost")
+        chroma_port = int(os.getenv("CHROMA_PORT", "8000"))
+        chroma   = ChromaStore(chroma_host, chroma_port)
+        embedder = Embedder()
+    bm25 = None if args.skip_bm25 else BM25Store(BM25_DIR)
 
     total = len(filtered)
     ok = skipped = failed = 0

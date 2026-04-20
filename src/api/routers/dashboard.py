@@ -16,7 +16,9 @@
 """
 from __future__ import annotations
 
+import json
 import os
+import re
 from contextlib import contextmanager
 from datetime import datetime, date
 from pathlib import Path
@@ -28,6 +30,13 @@ from fastapi import APIRouter
 load_dotenv(dotenv_path=Path(__file__).resolve().parents[3] / ".env")
 
 router = APIRouter(prefix="/api/dashboard", tags=["dashboard"])
+
+ROOT_DIR = Path(__file__).resolve().parents[3]
+PARSED_DIR = ROOT_DIR / "data" / "parsed"
+GENERATED_DIR = ROOT_DIR / "data" / "generated"
+QUESTIONS_DIR = ROOT_DIR / "data" / "questions"
+CHUNKS_DIR = ROOT_DIR / "data" / "chunks"
+_TOKEN_RE = re.compile(r"\S+", flags=re.UNICODE)
 
 
 # ---------------------------------------------------------------------------
@@ -80,6 +89,155 @@ def _serialize_rows(rows) -> list[dict]:
         {k: _dt(v) for k, v in dict(r).items()}
         for r in (rows or [])
     ]
+
+
+def _safe_read_json(path: Path) -> dict | list | None:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+
+
+def _estimate_tokens(text: str) -> int:
+    """Approximate tokens as count of non-whitespace fragments."""
+    if not text:
+        return 0
+    return len(_TOKEN_RE.findall(text))
+
+
+def _avg(nums: list[int | float]) -> float:
+    if not nums:
+        return 0.0
+    return float(sum(nums) / len(nums))
+
+
+def _summarize(items: list[dict], *, value_keys: tuple[str, ...] = ("chars", "tokens")) -> dict[str, Any]:
+    summary: dict[str, Any] = {"files_count": len(items)}
+    for key in value_keys:
+        values = [int(i.get(key, 0) or 0) for i in items]
+        summary[f"total_{key}"] = int(sum(values))
+        summary[f"avg_{key}"] = round(_avg(values), 1) if values else 0.0
+        summary[f"max_{key}"] = int(max(values)) if values else 0
+    return summary
+
+
+def _build_artifact_stats() -> dict[str, Any]:
+    parsed_items: list[dict[str, Any]] = []
+    generated_items: list[dict[str, Any]] = []
+    questions_items: list[dict[str, Any]] = []
+    chunks_items: list[dict[str, Any]] = []
+
+    for path in sorted(PARSED_DIR.glob("*_sections.json")):
+        data = _safe_read_json(path)
+        if not isinstance(data, dict):
+            continue
+        doc_id = path.stem.removesuffix("_sections")
+        section_count = len(data)
+        chars = sum(len(str(v.get("text", ""))) for v in data.values() if isinstance(v, dict))
+        parsed_items.append({
+            "doc_id": doc_id,
+            "sections_count": section_count,
+            "chars": chars,
+            "tokens": _estimate_tokens(" ".join(str(v.get("text", "")) for v in data.values() if isinstance(v, dict))),
+            "updated_at": datetime.fromtimestamp(path.stat().st_mtime).isoformat(),
+        })
+
+    for path in sorted(GENERATED_DIR.glob("*.md")):
+        doc_id = path.stem
+        try:
+            text = path.read_text(encoding="utf-8")
+        except Exception:
+            continue
+        generated_items.append({
+            "doc_id": doc_id,
+            "chars": len(text),
+            "tokens": _estimate_tokens(text),
+            "updated_at": datetime.fromtimestamp(path.stat().st_mtime).isoformat(),
+        })
+
+    for path in sorted(QUESTIONS_DIR.glob("*_questions.json")):
+        data = _safe_read_json(path)
+        if not isinstance(data, dict):
+            continue
+        doc_id = path.stem.removesuffix("_questions")
+        questions = data.get("questions", [])
+        if not isinstance(questions, list):
+            questions = []
+        q_texts = [str(q.get("question", "")) for q in questions if isinstance(q, dict)]
+        a_texts = [str(q.get("answer", "")) for q in questions if isinstance(q, dict)]
+        qa_text = "\n".join([*q_texts, *a_texts])
+        question_chars = [len(t) for t in q_texts]
+        answer_chars = [len(t) for t in a_texts]
+        questions_items.append({
+            "doc_id": doc_id,
+            "questions_count": len(questions),
+            "chars": len(qa_text),
+            "tokens": _estimate_tokens(qa_text),
+            "avg_question_chars": round(_avg(question_chars), 1) if question_chars else 0.0,
+            "max_question_chars": max(question_chars) if question_chars else 0,
+            "avg_answer_chars": round(_avg(answer_chars), 1) if answer_chars else 0.0,
+            "max_answer_chars": max(answer_chars) if answer_chars else 0,
+            "updated_at": datetime.fromtimestamp(path.stat().st_mtime).isoformat(),
+        })
+
+    for path in sorted(CHUNKS_DIR.glob("*_chunks.json")):
+        data = _safe_read_json(path)
+        if not isinstance(data, dict):
+            continue
+        doc_id = data.get("doc_id") or path.stem.removesuffix("_chunks")
+        chunks = data.get("chunks", [])
+        if not isinstance(chunks, list):
+            chunks = []
+        chunk_chars = [int(c.get("char_count", 0) or 0) for c in chunks if isinstance(c, dict)]
+        total_chars = sum(chunk_chars)
+        chunks_items.append({
+            "doc_id": str(doc_id),
+            "chunk_count": int(data.get("chunk_count", len(chunks)) or len(chunks)),
+            "indexed_count": int(data.get("indexed_count", 0) or 0),
+            "chars": total_chars,
+            "tokens": int(round(total_chars / 4.0)),
+            "avg_chunk_chars": round(_avg(chunk_chars), 1) if chunk_chars else 0.0,
+            "max_chunk_chars": max(chunk_chars) if chunk_chars else 0,
+            "updated_at": datetime.fromtimestamp(path.stat().st_mtime).isoformat(),
+        })
+
+    parsed_items.sort(key=lambda x: x["chars"], reverse=True)
+    generated_items.sort(key=lambda x: x["chars"], reverse=True)
+    questions_items.sort(key=lambda x: x["questions_count"], reverse=True)
+    chunks_items.sort(key=lambda x: x["chunk_count"], reverse=True)
+
+    questions_summary = _summarize(questions_items)
+    questions_counts = [int(i.get("questions_count", 0) or 0) for i in questions_items]
+    questions_summary["total_questions"] = int(sum(questions_counts))
+    questions_summary["avg_questions_per_doc"] = round(_avg(questions_counts), 1) if questions_counts else 0.0
+    questions_summary["max_questions_per_doc"] = int(max(questions_counts)) if questions_counts else 0
+
+    chunks_summary = _summarize(chunks_items)
+    chunk_counts = [int(i.get("chunk_count", 0) or 0) for i in chunks_items]
+    indexed_counts = [int(i.get("indexed_count", 0) or 0) for i in chunks_items]
+    chunks_summary["total_chunks"] = int(sum(chunk_counts))
+    chunks_summary["avg_chunks_per_doc"] = round(_avg(chunk_counts), 1) if chunk_counts else 0.0
+    chunks_summary["max_chunks_per_doc"] = int(max(chunk_counts)) if chunk_counts else 0
+    chunks_summary["total_indexed_chunks"] = int(sum(indexed_counts))
+
+    return {
+        "parsed_docs": {
+            "summary": _summarize(parsed_items),
+            "items": parsed_items,
+        },
+        "generated_docs": {
+            "summary": _summarize(generated_items),
+            "items": generated_items,
+        },
+        "questions": {
+            "summary": questions_summary,
+            "items": questions_items,
+        },
+        "chunks": {
+            "summary": chunks_summary,
+            "items": chunks_items,
+        },
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -359,6 +517,34 @@ def get_top_docs(limit: int = 10) -> list[dict]:
             ]
     except Exception:
         return []
+
+
+# ---------------------------------------------------------------------------
+# GET /api/dashboard/artifacts
+# ---------------------------------------------------------------------------
+
+@router.get("/artifacts")
+def get_artifacts_stats() -> dict[str, Any]:
+    """Сводная статистика по parsed/generated/questions/chunks артефактам."""
+    defaults: dict[str, Any] = {
+        "parsed_docs": {"summary": {"files_count": 0, "total_chars": 0, "avg_chars": 0.0, "max_chars": 0,
+                                    "total_tokens": 0, "avg_tokens": 0.0, "max_tokens": 0}, "items": []},
+        "generated_docs": {"summary": {"files_count": 0, "total_chars": 0, "avg_chars": 0.0, "max_chars": 0,
+                                       "total_tokens": 0, "avg_tokens": 0.0, "max_tokens": 0}, "items": []},
+        "questions": {"summary": {"files_count": 0, "total_chars": 0, "avg_chars": 0.0, "max_chars": 0,
+                                  "total_tokens": 0, "avg_tokens": 0.0, "max_tokens": 0,
+                                  "total_questions": 0, "avg_questions_per_doc": 0.0, "max_questions_per_doc": 0},
+                      "items": []},
+        "chunks": {"summary": {"files_count": 0, "total_chars": 0, "avg_chars": 0.0, "max_chars": 0,
+                               "total_tokens": 0, "avg_tokens": 0.0, "max_tokens": 0,
+                               "total_chunks": 0, "avg_chunks_per_doc": 0.0, "max_chunks_per_doc": 0,
+                               "total_indexed_chunks": 0},
+                   "items": []},
+    }
+    try:
+        return _build_artifact_stats()
+    except Exception:
+        return defaults
 
 
 # ---------------------------------------------------------------------------

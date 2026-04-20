@@ -4,8 +4,11 @@
 Хранится как {cluster}_bm25.pkl + {cluster}_meta.json в data/bm25_indexes/.
 
 Токенизация:
-  - регексп: только кириллица и латиница ([а-яёa-z]+)
-  - лемматизация через pymorphy2 с lru_cache (кеш по слову → снижает дубли)
+  - сохраняет как отдельные токены нормативные идентификаторы и служебные
+    конструкции: 115-ФЗ, 3624-У, ПОД/ФТ, ст. 7
+  - обычные слова лемматизирует через pymorphy2 с lru_cache
+  - специальные токены дополнительно раскладывает на части, чтобы запросы
+    "115 фз" и "под фт" совпадали с "115-ФЗ" и "ПОД/ФТ"
 
 Поиск возвращает список (chunk_id, bm25_score), отфильтрованный score > 0.
 """
@@ -59,13 +62,87 @@ def _lemmatize(word: str) -> str:
     return _get_morph().parse(word)[0].normal_form
 
 
-_TOKEN_RE = re.compile(r"[а-яёa-z]+")
+_DASH_RE = re.compile(r"[\u2010-\u2015\u2212-]+")
+_ARTICLE_RE = re.compile(r"ст\.?\s*\d+(?:\.\d+)*", re.IGNORECASE)
+_DOC_REF_RE = re.compile(r"(?:№\s*)?\d{1,5}\s*[\u2010-\u2015\u2212-]\s*[а-яёa-z]{1,6}", re.IGNORECASE)
+_SLASH_ABBR_RE = re.compile(r"[а-яёa-z]{2,10}(?:/[а-яёa-z]{2,10})+", re.IGNORECASE)
+_ALNUM_RE = re.compile(r"(?:[a-zа-яё]+\d+[a-zа-яё]*|\d+[a-zа-яё]+)", re.IGNORECASE)
+_WORD_RE = re.compile(r"[а-яёa-z]+")
+_MASTER_TOKEN_RE = re.compile(
+    "|".join(
+        (
+            _ARTICLE_RE.pattern,
+            _DOC_REF_RE.pattern,
+            _SLASH_ABBR_RE.pattern,
+            _ALNUM_RE.pattern,
+            _WORD_RE.pattern,
+        )
+    ),
+    re.IGNORECASE,
+)
+
+
+def _normalize_dash_token(token: str) -> str:
+    """Нормализует дефисы и пробелы вокруг них."""
+    token = token.strip().lower().replace("№", "")
+    token = _DASH_RE.sub("-", token)
+    token = re.sub(r"\s*-\s*", "-", token)
+    token = re.sub(r"\s+", " ", token)
+    return token.strip()
+
+
+def _special_token_variants(token: str) -> list[str]:
+    """Возвращает варианты специальных токенов без лемматизации.
+
+    Для нормативных идентификаторов и аббревиатур сохраняем:
+      - целиковый токен: 115-фз, под/фт, ст.7
+      - полезные части: 115, фз, под, фт, 7
+    """
+    token = token.strip().lower()
+
+    if _ARTICLE_RE.fullmatch(token):
+        number = re.sub(r"^ст\.?\s*", "", token)
+        return [f"ст.{number}"]
+
+    if _DOC_REF_RE.fullmatch(token):
+        normalized = _normalize_dash_token(token)
+        parts = [part for part in normalized.split("-") if part]
+        variants = [normalized]
+        if parts and parts[0].isdigit():
+            variants.append(parts[0])
+        if len(parts) > 1 and len(parts[1]) > 1:
+            variants.append(parts[1])
+        return variants
+
+    if _SLASH_ABBR_RE.fullmatch(token):
+        normalized = re.sub(r"\s*/\s*", "/", token)
+        parts = [part for part in normalized.split("/") if part]
+        return [normalized, *parts]
+
+    if _ALNUM_RE.fullmatch(token):
+        return [token]
+
+    return []
 
 
 def tokenize(text: str) -> list[str]:
-    """Токенизирует и лемматизирует текст для BM25."""
-    tokens = _TOKEN_RE.findall(text.lower())
-    return [_lemmatize(t) for t in tokens]
+    """Токенизирует текст для BM25 с учётом банковско-юридических ссылок.
+
+    Специальные токены вроде 115-ФЗ, 3624-У, ПОД/ФТ и ст. 7 сохраняются
+    целиком и не отправляются в pymorphy2. Обычные слова лемматизируются.
+    """
+    normalized = text.lower().replace("\xa0", " ")
+    tokens: list[str] = []
+
+    for match in _MASTER_TOKEN_RE.finditer(normalized):
+        raw = match.group(0)
+        special = _special_token_variants(raw)
+        if special:
+            tokens.extend(special)
+            continue
+        tokens.append(_lemmatize(raw))
+
+    return tokens
 
 
 # ---------------------------------------------------------------------------

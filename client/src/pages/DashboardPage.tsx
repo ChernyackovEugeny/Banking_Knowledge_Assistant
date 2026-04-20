@@ -8,9 +8,9 @@ import {
 import {
   AnomaliesData, DocEntry, GenSession, OverviewData,
   ParseSession, PipelineData, RecentRequest, TimelinePoint,
-  TokenPoint, ValidationCheck,
+  TokenPoint, ValidationCheck, ArtifactsData,
   fetchAnomalies, fetchOverview, fetchPipeline, fetchRecent,
-  fetchTimeline, fetchTokens, fetchTopDocs,
+  fetchTimeline, fetchTokens, fetchTopDocs, fetchArtifacts,
 } from '../api/dashboard'
 
 // ──────────────────────────────────────────────────────────────────────────
@@ -28,6 +28,11 @@ function fmtTokens(n: number | null): string {
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`
   if (n >= 1_000) return `${(n / 1_000).toFixed(1)}K`
   return String(n)
+}
+
+function fmtInt(n: number | null | undefined): string {
+  if (n == null) return '—'
+  return n.toLocaleString('ru-RU')
 }
 
 function fmtDate(iso: string | null): string {
@@ -538,7 +543,164 @@ function ValidationSummary({ checks }: { checks: ValidationCheck[] }) {
   )
 }
 
-function GenerationTab({ sessions, validation }: { sessions: GenSession[], validation: ValidationCheck[] }) {
+function ArtifactsSection({ artifacts }: { artifacts: ArtifactsData | null }) {
+  if (!artifacts) return null
+
+  const { parsed_docs, generated_docs, questions, chunks } = artifacts
+
+  return (
+    <div className="space-y-6">
+      <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-4">
+        <SectionTitle>Артефакты данных: parsed / generated / questions / chunks</SectionTitle>
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+          <StatCard
+            label="Parsed docs"
+            value={fmtInt(parsed_docs.summary.files_count)}
+            sub={`avg ${fmtInt(Math.round(parsed_docs.summary.avg_chars))} chars, ${fmtInt(Math.round(parsed_docs.summary.avg_tokens))} tokens`}
+          />
+          <StatCard
+            label="Generated docs"
+            value={fmtInt(generated_docs.summary.files_count)}
+            sub={`avg ${fmtInt(Math.round(generated_docs.summary.avg_chars))} chars, ${fmtInt(Math.round(generated_docs.summary.avg_tokens))} tokens`}
+          />
+          <StatCard
+            label="Question sets"
+            value={fmtInt(questions.summary.files_count)}
+            sub={`${fmtInt(questions.summary.total_questions)} questions, avg ${fmtInt(Math.round(questions.summary.avg_tokens))} tokens`}
+          />
+          <StatCard
+            label="Chunks"
+            value={fmtInt(chunks.summary.total_chunks)}
+            sub={`${fmtInt(chunks.summary.total_indexed_chunks)} indexed, avg ${fmtInt(Math.round(chunks.summary.avg_tokens))} tokens`}
+          />
+        </div>
+        <p className="text-xs text-gray-400 mt-3">
+          Токены в этой секции оценочные (approx), для оперативного мониторинга объёмов.
+        </p>
+      </div>
+
+      <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
+        <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
+          <div className="px-4 pt-4 pb-2">
+            <SectionTitle>Parsed документы</SectionTitle>
+          </div>
+          <div className="overflow-x-auto">
+            <table className="w-full text-xs">
+              <thead className="bg-gray-50 text-gray-500 uppercase tracking-wide">
+                <tr>
+                  <th className="px-4 py-2 text-left font-medium">Doc</th>
+                  <th className="px-4 py-2 text-right font-medium">Sections</th>
+                  <th className="px-4 py-2 text-right font-medium">Chars</th>
+                  <th className="px-4 py-2 text-right font-medium">Tokens</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-gray-100">
+                {parsed_docs.items.slice(0, 12).map((d) => (
+                  <tr key={d.doc_id} className="hover:bg-gray-50">
+                    <td className="px-4 py-2 font-mono text-brand-700">{d.doc_id}</td>
+                    <td className="px-4 py-2 text-right text-gray-600">{fmtInt(d.sections_count)}</td>
+                    <td className="px-4 py-2 text-right text-gray-700">{fmtInt(d.chars)}</td>
+                    <td className="px-4 py-2 text-right text-gray-500">{fmtInt(d.tokens)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
+          <div className="px-4 pt-4 pb-2">
+            <SectionTitle>Generated документы</SectionTitle>
+          </div>
+          <div className="overflow-x-auto">
+            <table className="w-full text-xs">
+              <thead className="bg-gray-50 text-gray-500 uppercase tracking-wide">
+                <tr>
+                  <th className="px-4 py-2 text-left font-medium">Doc</th>
+                  <th className="px-4 py-2 text-right font-medium">Chars</th>
+                  <th className="px-4 py-2 text-right font-medium">Tokens</th>
+                  <th className="px-4 py-2 text-right font-medium">Updated</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-gray-100">
+                {generated_docs.items.slice(0, 12).map((d) => (
+                  <tr key={d.doc_id} className="hover:bg-gray-50">
+                    <td className="px-4 py-2 font-mono text-brand-700">{d.doc_id}</td>
+                    <td className="px-4 py-2 text-right text-gray-700">{fmtInt(d.chars)}</td>
+                    <td className="px-4 py-2 text-right text-gray-500">{fmtInt(d.tokens)}</td>
+                    <td className="px-4 py-2 text-right text-gray-400">{fmtDate(d.updated_at)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
+          <div className="px-4 pt-4 pb-2">
+            <SectionTitle>Сгенерированные вопросы</SectionTitle>
+          </div>
+          <div className="overflow-x-auto">
+            <table className="w-full text-xs">
+              <thead className="bg-gray-50 text-gray-500 uppercase tracking-wide">
+                <tr>
+                  <th className="px-4 py-2 text-left font-medium">Doc</th>
+                  <th className="px-4 py-2 text-right font-medium">Q count</th>
+                  <th className="px-4 py-2 text-right font-medium">Avg Q chars</th>
+                  <th className="px-4 py-2 text-right font-medium">Max A chars</th>
+                  <th className="px-4 py-2 text-right font-medium">Tokens</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-gray-100">
+                {questions.items.slice(0, 12).map((q) => (
+                  <tr key={q.doc_id} className="hover:bg-gray-50">
+                    <td className="px-4 py-2 font-mono text-brand-700">{q.doc_id}</td>
+                    <td className="px-4 py-2 text-right text-gray-700">{fmtInt(q.questions_count)}</td>
+                    <td className="px-4 py-2 text-right text-gray-600">{fmtInt(Math.round(q.avg_question_chars))}</td>
+                    <td className="px-4 py-2 text-right text-gray-600">{fmtInt(q.max_answer_chars)}</td>
+                    <td className="px-4 py-2 text-right text-gray-500">{fmtInt(q.tokens)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
+          <div className="px-4 pt-4 pb-2">
+            <SectionTitle>Чанки</SectionTitle>
+          </div>
+          <div className="overflow-x-auto">
+            <table className="w-full text-xs">
+              <thead className="bg-gray-50 text-gray-500 uppercase tracking-wide">
+                <tr>
+                  <th className="px-4 py-2 text-left font-medium">Doc</th>
+                  <th className="px-4 py-2 text-right font-medium">Chunks</th>
+                  <th className="px-4 py-2 text-right font-medium">Indexed</th>
+                  <th className="px-4 py-2 text-right font-medium">Avg chunk chars</th>
+                  <th className="px-4 py-2 text-right font-medium">Max chunk chars</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-gray-100">
+                {chunks.items.slice(0, 12).map((c) => (
+                  <tr key={c.doc_id} className="hover:bg-gray-50">
+                    <td className="px-4 py-2 font-mono text-brand-700">{c.doc_id}</td>
+                    <td className="px-4 py-2 text-right text-gray-700">{fmtInt(c.chunk_count)}</td>
+                    <td className="px-4 py-2 text-right text-gray-600">{fmtInt(c.indexed_count)}</td>
+                    <td className="px-4 py-2 text-right text-gray-600">{fmtInt(Math.round(c.avg_chunk_chars))}</td>
+                    <td className="px-4 py-2 text-right text-gray-500">{fmtInt(c.max_chunk_chars)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function GenerationTab({ sessions, validation, artifacts }: { sessions: GenSession[], validation: ValidationCheck[], artifacts: ArtifactsData | null }) {
   return (
     <div className="space-y-6">
       <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
@@ -569,6 +731,7 @@ function GenerationTab({ sessions, validation }: { sessions: GenSession[], valid
         )}
       </div>
       <ValidationSummary checks={validation} />
+      <ArtifactsSection artifacts={artifacts} />
     </div>
   )
 }
@@ -592,6 +755,7 @@ export function DashboardPage() {
   const [anomalies, setAnomalies] = useState<AnomaliesData | null>(null)
   const [topDocs, setTopDocs]     = useState<DocEntry[]>([])
   const [pipeline, setPipeline]   = useState<PipelineData | null>(null)
+  const [artifacts, setArtifacts] = useState<ArtifactsData | null>(null)
 
   const pipelineLoadedRef = useRef(false)
 
@@ -624,8 +788,12 @@ export function DashboardPage() {
   const fetchPipelineData = useCallback(async () => {
     if (pipelineLoadedRef.current) return
     try {
-      const data = await fetchPipeline()
-      setPipeline(data)
+      const [pipelineData, artifactsData] = await Promise.all([
+        fetchPipeline(),
+        fetchArtifacts(),
+      ])
+      setPipeline(pipelineData)
+      setArtifacts(artifactsData)
       pipelineLoadedRef.current = true
     } catch {
       // Non-critical: show empty state
@@ -656,7 +824,7 @@ export function DashboardPage() {
   ]
 
   return (
-    <div className="min-h-full bg-gray-50 flex flex-col">
+    <div className="h-full bg-gray-50 flex flex-col">
       {/* Header */}
       <header className="bg-brand-800 text-white px-5 py-3.5 flex items-center gap-3 shadow-md flex-shrink-0">
         <div className="w-9 h-9 rounded-lg bg-gold-500 flex items-center justify-center flex-shrink-0">
@@ -710,7 +878,7 @@ export function DashboardPage() {
       </div>
 
       {/* Content */}
-      <main className="flex-1 p-5 max-w-7xl mx-auto w-full">
+      <main className="flex-1 min-h-0 overflow-y-auto p-5 max-w-7xl mx-auto w-full">
         {error ? (
           <div className="bg-red-50 border border-red-200 rounded-xl p-4 text-red-700 text-sm">
             {error}
@@ -730,6 +898,7 @@ export function DashboardPage() {
           <GenerationTab
             sessions={pipeline?.gen_sessions ?? []}
             validation={pipeline?.validation_summary ?? []}
+            artifacts={artifacts}
           />
         )}
       </main>

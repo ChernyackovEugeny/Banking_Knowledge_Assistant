@@ -116,6 +116,86 @@ export interface PipelineData {
   validation_summary: ValidationCheck[]
 }
 
+export interface ArtifactSummary {
+  files_count: number
+  total_chars: number
+  avg_chars: number
+  max_chars: number
+  total_tokens: number
+  avg_tokens: number
+  max_tokens: number
+}
+
+export interface ParsedDocStat {
+  doc_id: string
+  sections_count: number
+  chars: number
+  tokens: number
+  updated_at: string
+}
+
+export interface GeneratedDocStat {
+  doc_id: string
+  chars: number
+  tokens: number
+  updated_at: string
+}
+
+export interface QuestionSetStat {
+  doc_id: string
+  questions_count: number
+  chars: number
+  tokens: number
+  avg_question_chars: number
+  max_question_chars: number
+  avg_answer_chars: number
+  max_answer_chars: number
+  updated_at: string
+}
+
+export interface ChunkStat {
+  doc_id: string
+  chunk_count: number
+  indexed_count: number
+  chars: number
+  tokens: number
+  avg_chunk_chars: number
+  max_chunk_chars: number
+  updated_at: string
+}
+
+export interface QuestionsSummary extends ArtifactSummary {
+  total_questions: number
+  avg_questions_per_doc: number
+  max_questions_per_doc: number
+}
+
+export interface ChunksSummary extends ArtifactSummary {
+  total_chunks: number
+  avg_chunks_per_doc: number
+  max_chunks_per_doc: number
+  total_indexed_chunks: number
+}
+
+export interface ArtifactsData {
+  parsed_docs: {
+    summary: ArtifactSummary
+    items: ParsedDocStat[]
+  }
+  generated_docs: {
+    summary: ArtifactSummary
+    items: GeneratedDocStat[]
+  }
+  questions: {
+    summary: QuestionsSummary
+    items: QuestionSetStat[]
+  }
+  chunks: {
+    summary: ChunksSummary
+    items: ChunkStat[]
+  }
+}
+
 // ──────────────────────────────────────────────────────────────────────────
 // Fetch functions
 // ──────────────────────────────────────────────────────────────────────────
@@ -135,3 +215,4 @@ export const fetchRecent     = (limit = 20) => get<RecentRequest[]>(`/chat/recen
 export const fetchAnomalies  = () => get<AnomaliesData>('/chat/anomalies')
 export const fetchTopDocs    = () => get<DocEntry[]>('/chat/docs')
 export const fetchPipeline   = () => get<PipelineData>('/pipeline')
+export const fetchArtifacts  = () => get<ArtifactsData>('/artifacts')
