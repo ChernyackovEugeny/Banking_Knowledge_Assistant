@@ -134,9 +134,32 @@ def _build_artifact_stats() -> dict[str, Any]:
         doc_id = path.stem.removesuffix("_sections")
         section_count = len(data)
         chars = sum(len(str(v.get("text", ""))) for v in data.values() if isinstance(v, dict))
+        sections_with_tables = 0
+        sections_enriched = 0
+        total_tables = 0
+        enriched_tables = 0
+        for value in data.values():
+            if not isinstance(value, dict):
+                continue
+            metadata = value.get("metadata") or {}
+            tables = metadata.get("tables") or []
+            if tables:
+                sections_with_tables += 1
+                total_tables += len(tables)
+                enriched_in_section = sum(
+                    1 for t in tables
+                    if isinstance(t, dict) and str(t.get("summary", "")).strip()
+                )
+                enriched_tables += enriched_in_section
+                if enriched_in_section > 0:
+                    sections_enriched += 1
         parsed_items.append({
             "doc_id": doc_id,
             "sections_count": section_count,
+            "sections_with_tables": sections_with_tables,
+            "sections_enriched": sections_enriched,
+            "tables_count": total_tables,
+            "enriched_tables_count": enriched_tables,
             "chars": chars,
             "tokens": _estimate_tokens(" ".join(str(v.get("text", "")) for v in data.values() if isinstance(v, dict))),
             "updated_at": datetime.fromtimestamp(path.stat().st_mtime).isoformat(),
@@ -200,7 +223,6 @@ def _build_artifact_stats() -> dict[str, Any]:
             "max_chunk_chars": max(chunk_chars) if chunk_chars else 0,
             "updated_at": datetime.fromtimestamp(path.stat().st_mtime).isoformat(),
         })
-
     parsed_items.sort(key=lambda x: x["chars"], reverse=True)
     generated_items.sort(key=lambda x: x["chars"], reverse=True)
     questions_items.sort(key=lambda x: x["questions_count"], reverse=True)
@@ -219,10 +241,24 @@ def _build_artifact_stats() -> dict[str, Any]:
     chunks_summary["avg_chunks_per_doc"] = round(_avg(chunk_counts), 1) if chunk_counts else 0.0
     chunks_summary["max_chunks_per_doc"] = int(max(chunk_counts)) if chunk_counts else 0
     chunks_summary["total_indexed_chunks"] = int(sum(indexed_counts))
+    chunks_summary["avg_tokens_per_chunk"] = (
+        round(chunks_summary["total_tokens"] / chunks_summary["total_chunks"], 1)
+        if chunks_summary["total_chunks"] > 0 else 0.0
+    )
+
+    docs_with_tables = [i for i in parsed_items if int(i.get("tables_count", 0) or 0) > 0]
+    docs_enriched = [i for i in parsed_items if int(i.get("enriched_tables_count", 0) or 0) > 0]
+    parsed_summary = _summarize(parsed_items)
+    parsed_summary["docs_with_tables"] = len(docs_with_tables)
+    parsed_summary["docs_enriched"] = len(docs_enriched)
+    parsed_summary["sections_with_tables"] = int(sum(int(i.get("sections_with_tables", 0) or 0) for i in parsed_items))
+    parsed_summary["sections_enriched"] = int(sum(int(i.get("sections_enriched", 0) or 0) for i in parsed_items))
+    parsed_summary["total_tables"] = int(sum(int(i.get("tables_count", 0) or 0) for i in parsed_items))
+    parsed_summary["enriched_tables"] = int(sum(int(i.get("enriched_tables_count", 0) or 0) for i in parsed_items))
 
     return {
         "parsed_docs": {
-            "summary": _summarize(parsed_items),
+            "summary": parsed_summary,
             "items": parsed_items,
         },
         "generated_docs": {
@@ -528,7 +564,9 @@ def get_artifacts_stats() -> dict[str, Any]:
     """Сводная статистика по parsed/generated/questions/chunks артефактам."""
     defaults: dict[str, Any] = {
         "parsed_docs": {"summary": {"files_count": 0, "total_chars": 0, "avg_chars": 0.0, "max_chars": 0,
-                                    "total_tokens": 0, "avg_tokens": 0.0, "max_tokens": 0}, "items": []},
+                                    "total_tokens": 0, "avg_tokens": 0.0, "max_tokens": 0,
+                                    "docs_with_tables": 0, "docs_enriched": 0, "sections_with_tables": 0,
+                                    "sections_enriched": 0, "total_tables": 0, "enriched_tables": 0}, "items": []},
         "generated_docs": {"summary": {"files_count": 0, "total_chars": 0, "avg_chars": 0.0, "max_chars": 0,
                                        "total_tokens": 0, "avg_tokens": 0.0, "max_tokens": 0}, "items": []},
         "questions": {"summary": {"files_count": 0, "total_chars": 0, "avg_chars": 0.0, "max_chars": 0,
@@ -538,7 +576,7 @@ def get_artifacts_stats() -> dict[str, Any]:
         "chunks": {"summary": {"files_count": 0, "total_chars": 0, "avg_chars": 0.0, "max_chars": 0,
                                "total_tokens": 0, "avg_tokens": 0.0, "max_tokens": 0,
                                "total_chunks": 0, "avg_chunks_per_doc": 0.0, "max_chunks_per_doc": 0,
-                               "total_indexed_chunks": 0},
+                               "total_indexed_chunks": 0, "avg_tokens_per_chunk": 0.0},
                    "items": []},
     }
     try:

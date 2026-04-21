@@ -220,4 +220,6 @@ diagnose_garant.py
 
 CLAUDE.md
 node_modules
-
+backfill_table_metadata.py
+audit_parsed.py
+table_summary.py

@@ -13,9 +13,10 @@ import logging
 import re
 from datetime import date, datetime
 
-from bs4 import BeautifulSoup, Tag
+from bs4 import BeautifulSoup, NavigableString, Tag
 
 from extractors.base import AbstractExtractor, RawDocument
+from tables import TableIdGenerator, format_table
 
 logger = logging.getLogger(__name__)
 
@@ -44,8 +45,87 @@ def _soup(raw_bytes: bytes) -> BeautifulSoup:
         return BeautifulSoup(raw_bytes, "lxml")
 
 
+def _iter_table_rows(table: Tag):
+    """Даёт <tr>-потомков таблицы только первого уровня (не залезая во вложенные <table>).
+
+    Проходит <tr> как прямых детей <table>, а также через обёртки <thead>/<tbody>/<tfoot>.
+    Игнорирует <tr> внутри вложенных таблиц, если они есть.
+    """
+    for child in table.children:
+        if not isinstance(child, Tag):
+            continue
+        if child.name == "tr":
+            yield child
+        elif child.name in ("thead", "tbody", "tfoot"):
+            for sub in child.children:
+                if isinstance(sub, Tag) and sub.name == "tr":
+                    yield sub
+
+
+def _table_to_markdown(table: Tag, id_gen: TableIdGenerator) -> str:
+    """Рендерит <table> как Markdown pipe-блок с маркерами ⟦TABLE⟧.
+
+    Учитывает rowspan/colspan: содержимое spanned-ячейки дублируется во все
+    занимаемые позиции — так retrieval не теряет контекст для подытогов
+    и горизонтальных группировок.
+    """
+    occupied: dict[tuple[int, int], str] = {}
+    for r, tr in enumerate(_iter_table_rows(table)):
+        c = 0
+        for cell in tr.find_all(["td", "th"], recursive=False):
+            while (r, c) in occupied:
+                c += 1
+            cell_text = cell.get_text(separator=" ", strip=True)
+            try:
+                rs = max(1, int(cell.get("rowspan", 1) or 1))
+                cs = max(1, int(cell.get("colspan", 1) or 1))
+            except (TypeError, ValueError):
+                rs, cs = 1, 1
+            for dr in range(rs):
+                for dc in range(cs):
+                    occupied[(r + dr, c + dc)] = cell_text
+            c += cs
+
+    if not occupied:
+        return ""
+
+    max_row = max(r for r, _ in occupied)
+    max_col = max(c for _, c in occupied)
+
+    rows: list[list[str | None]] = []
+    for r in range(max_row + 1):
+        rows.append([occupied.get((r, c), "") for c in range(max_col + 1)])
+
+    caption_tag = table.find("caption", recursive=False)
+    caption = caption_tag.get_text(" ", strip=True) if caption_tag else None
+
+    return format_table(rows, id_gen.next_id(), caption=caption)
+
+
+def _inline_tables_as_markdown(container: Tag) -> None:
+    """Заменяет все <table> внутри container на текстовые узлы с Markdown.
+
+    Модифицирует DOM in-place. Вызывать до ``_tag_to_text`` /
+    ``container.get_text(...)``, иначе содержимое таблицы будет извлечено
+    плоско и потеряет структуру строк и колонок.
+    """
+    id_gen = TableIdGenerator()
+    for table in list(container.find_all("table")):
+        md = _table_to_markdown(table, id_gen)
+        if md:
+            # Пустые строки вокруг блока гарантируют, что таблица не слипнется
+            # с соседним абзацем. Избыточные переносы схлопнет _normalize.
+            table.replace_with(NavigableString(f"\n\n{md}\n\n"))
+        else:
+            table.decompose()
+
+
 def _tag_to_text(tag: Tag) -> str:
     """Превращает HTML-тег в чистый текст, сохраняя переносы строк у блочных элементов."""
+    # Таблицы рендерим в Markdown с маркерами до перехода к плоскому тексту,
+    # иначе get_text() мгновенно потеряет структуру строк и колонок.
+    _inline_tables_as_markdown(tag)
+
     # Заменяем блочные теги переносами, чтобы сохранить структуру абзацев
     for block in tag.find_all(["p", "div", "li", "br", "h1", "h2", "h3", "h4", "h5", "h6"]):
         block.insert_before("\n")
@@ -55,7 +135,7 @@ def _tag_to_text(tag: Tag) -> str:
     # Убираем избыточные пробелы внутри строк, но сохраняем переносы
     lines = [re.sub(r"[ \t]+", " ", line).strip() for line in text.split("\n")]
     text = "\n".join(lines)
-    
+
     # Убираем более двух пустых строк подряд
     text = re.sub(r"\n{3,}", "\n\n", text)
     return text.strip()
@@ -272,6 +352,9 @@ class KonturExtractor(AbstractExtractor):
 
         title_tag = soup.select_one("h1.doc_titlebar-title")
         title = title_tag.get_text(strip=True) if title_tag else None
+
+        # KonturExtractor не вызывает _tag_to_text, поэтому таблицы инлайним вручную.
+        _inline_tables_as_markdown(container)
 
         raw_text = container.get_text(separator="\n")
         lines = [re.sub(r"[ \t]+", " ", line).strip() for line in raw_text.splitlines()]

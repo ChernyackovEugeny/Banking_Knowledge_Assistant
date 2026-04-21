@@ -17,6 +17,7 @@ import zipfile
 from lxml import etree
 
 from extractors.base import AbstractExtractor, RawDocument
+from tables import TableIdGenerator, format_table
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +30,7 @@ _NS = {
     "office": "urn:oasis:names:tc:opendocument:xmlns:office:1.0",
     "meta": "urn:oasis:names:tc:opendocument:xmlns:meta:1.0",
     "dc": "http://purl.org/dc/elements/1.1/",
+    "table": "urn:oasis:names:tc:opendocument:xmlns:table:1.0",
 }
 
 _TEXT_P  = f"{{{_NS['text']}}}p"
@@ -36,6 +38,14 @@ _TEXT_H  = f"{{{_NS['text']}}}h"
 _TEXT_S  = f"{{{_NS['text']}}}s"          # &nbsp;-пробелы
 _TEXT_TAB = f"{{{_NS['text']}}}tab"       # табуляция
 _TEXT_LB = f"{{{_NS['text']}}}line-break" # явный перенос строки внутри абзаца
+
+_TABLE_TABLE = f"{{{_NS['table']}}}table"
+_TABLE_ROW = f"{{{_NS['table']}}}table-row"
+_TABLE_CELL = f"{{{_NS['table']}}}table-cell"
+_TABLE_COVERED = f"{{{_NS['table']}}}covered-table-cell"
+_TABLE_COLUMNS_SPANNED = f"{{{_NS['table']}}}number-columns-spanned"
+_TABLE_ROWS_SPANNED = f"{{{_NS['table']}}}number-rows-spanned"
+_OFFICE_TEXT = f"{{{_NS['office']}}}text"
 
 
 def _is_odt(raw_bytes: bytes) -> bool:
@@ -89,6 +99,97 @@ def _element_text(elem: etree._Element) -> str:
             parts.append(child.tail)
 
     return "".join(parts)
+
+
+def _cell_text(cell_el: etree._Element) -> str:
+    """Собирает текст ячейки таблицы из всех вложенных <text:p>/<text:h>.
+
+    Каждый абзац внутри ячейки даёт самостоятельную строку визуально, но в
+    pipe-таблице multiline-ячейки не поддерживаются, поэтому соединяем их
+    через пробел (в итоговой нормализации ``format_table`` схлопнет пробелы).
+    """
+    parts: list[str] = []
+    for sub in cell_el.iter(_TEXT_P, _TEXT_H):
+        parts.append(_element_text(sub))
+    return " ".join(p.strip() for p in parts if p.strip())
+
+
+def _odt_table_to_markdown(table_el: etree._Element, id_gen: TableIdGenerator) -> str:
+    """Преобразует <table:table> в Markdown pipe-формат с маркерами ⟦TABLE⟧.
+
+    Поддерживает colspan/rowspan через дублирование содержимого ячейки во
+    все spanned-позиции сетки. ``<table:covered-table-cell>`` игнорируем —
+    они уже учтены занятыми позициями в grid.
+    """
+    grid: dict[tuple[int, int], str] = {}
+
+    row_elems = [child for child in table_el if child.tag == _TABLE_ROW]
+    for r, row_el in enumerate(row_elems):
+        c = 0
+        for cell_el in row_el:
+            tag = cell_el.tag
+            if tag == _TABLE_COVERED:
+                # covered-cell — позиция, перекрытая предыдущим rowspan/colspan;
+                # в grid она уже записана, пропускаем, двигая курсор колонки.
+                c += 1
+                continue
+            if tag != _TABLE_CELL:
+                continue
+
+            while (r, c) in grid:
+                c += 1
+
+            text = _cell_text(cell_el)
+            try:
+                cs = max(1, int(cell_el.get(_TABLE_COLUMNS_SPANNED, "1") or 1))
+                rs = max(1, int(cell_el.get(_TABLE_ROWS_SPANNED, "1") or 1))
+            except (TypeError, ValueError):
+                cs, rs = 1, 1
+
+            for dr in range(rs):
+                for dc in range(cs):
+                    grid[(r + dr, c + dc)] = text
+            c += cs
+
+    if not grid:
+        return ""
+
+    max_row = max(r for r, _ in grid)
+    max_col = max(c for _, c in grid)
+    rows: list[list[str | None]] = [
+        [grid.get((r, c), "") for c in range(max_col + 1)]
+        for r in range(max_row + 1)
+    ]
+    return format_table(rows, id_gen.next_id())
+
+
+def _walk_body(
+    elem: etree._Element,
+    lines: list[str],
+    id_gen: TableIdGenerator,
+) -> None:
+    """Обходит тело документа в порядке XML и выдаёт строки текста.
+
+    * ``<text:p>``/``<text:h>`` → одна строка с нормализованными пробелами.
+    * ``<table:table>`` → Markdown-блок с маркерами, окружённый пустыми строками.
+    * Прочие обёртки (sections, lists, frames) проходим рекурсивно, чтобы не
+      потерять вложенные абзацы и таблицы, но сохранить их порядок.
+    """
+    for child in elem:
+        tag = child.tag
+        if tag in (_TEXT_P, _TEXT_H):
+            text = _element_text(child)
+            text = re.sub(r"[ \t]+", " ", text).strip()
+            lines.append(text)
+        elif tag == _TABLE_TABLE:
+            md = _odt_table_to_markdown(child, id_gen)
+            if md:
+                # Пустые строки вокруг блока отделяют таблицу от соседних абзацев.
+                lines.append("")
+                lines.append(md)
+                lines.append("")
+        else:
+            _walk_body(child, lines, id_gen)
 
 
 def _extract_title(meta_root: etree._Element | None) -> str | None:
@@ -146,13 +247,16 @@ class ODTExtractor(AbstractExtractor):
 
         title = _extract_title(meta_root)
 
-        # Собираем параграфы и заголовки в порядке появления в XML
+        # Обходим тело документа в XML-порядке: параграфы, заголовки и таблицы
+        # перемешаны в исходнике, поэтому плоский root.iter() для text:p/text:h
+        # сломал бы порядок таблиц относительно окружающего текста.
+        body = root.find(f".//{_OFFICE_TEXT}")
+        if body is None:
+            body = root
+
         lines: list[str] = []
-        for elem in root.iter(_TEXT_P, _TEXT_H):
-            text = _element_text(elem)
-            # Убираем лишние пробелы внутри строки, но сохраняем явные переносы
-            text = re.sub(r"[ \t]+", " ", text).strip()
-            lines.append(text)  # Пустые строки сохраняем — они разделяют абзацы
+        id_gen = TableIdGenerator()
+        _walk_body(body, lines, id_gen)
 
         # Убираем более двух пустых строк подряд, склеиваем в итоговый текст
         text = "\n".join(lines)

@@ -16,6 +16,15 @@
 """
 from __future__ import annotations
 
+import sys
+from pathlib import Path
+
+_PARSING_DIR = Path(__file__).resolve().parents[1] / "parsing"
+if str(_PARSING_DIR) not in sys.path:
+    sys.path.insert(0, str(_PARSING_DIR))
+
+from tables import contains_tables, inject_table_summaries, iter_table_blocks, split_table_block
+
 SEPARATORS: list[str] = ["\n\n", "\n", ". ", "; ", ", ", " "]
 
 
@@ -35,6 +44,50 @@ def split_text(text: str, max_chars: int, overlap: int) -> list[str]:
         return [text]
     segments = _clean_split(text, max_chars, sep_index=0)
     return _add_overlap(segments, overlap)
+
+
+def prepare_text_for_chunking(
+    text: str,
+    table_summaries: dict[str, str] | None = None,
+) -> str:
+    """Inject optional table summaries into text before chunking/embedding."""
+    if not contains_tables(text):
+        return text
+    return inject_table_summaries(text, table_summaries)
+
+
+def split_text_table_aware(
+    text: str,
+    max_chars: int,
+    overlap: int,
+    *,
+    table_summaries: dict[str, str] | None = None,
+) -> list[str]:
+    """Split text without cutting through table blocks or table rows."""
+    if not contains_tables(text):
+        return split_text(prepare_text_for_chunking(text, table_summaries), max_chars, overlap)
+
+    atomic_segments: list[str] = []
+    pos = 0
+    for block in iter_table_blocks(text):
+        before = text[pos:block.start].strip()
+        if before:
+            atomic_segments.extend(split_text(before, max_chars, 0))
+        atomic_segments.extend(
+            split_table_block(
+                block,
+                max_chars,
+                summary=(table_summaries or {}).get(block.table_id),
+            )
+        )
+        pos = block.end
+
+    tail = text[pos:].strip()
+    if tail:
+        atomic_segments.extend(split_text(tail, max_chars, 0))
+
+    packed = _pack_segments(atomic_segments, max_chars)
+    return packed or [prepare_text_for_chunking(text, table_summaries)]
 
 
 # ---------------------------------------------------------------------------
@@ -106,3 +159,25 @@ def _add_overlap(segments: list[str], overlap: int) -> list[str]:
         else:
             result.append(segments[i])
     return result
+
+
+def _pack_segments(segments: list[str], max_chars: int) -> list[str]:
+    """Greedily merge pre-split segments while respecting table boundaries."""
+    if not segments:
+        return []
+
+    chunks: list[str] = []
+    current = ""
+    for segment in segments:
+        if not segment:
+            continue
+        candidate = segment if not current else f"{current}\n\n{segment}"
+        if current and len(candidate) > max_chars:
+            chunks.append(current)
+            current = segment
+        else:
+            current = candidate
+
+    if current:
+        chunks.append(current)
+    return chunks

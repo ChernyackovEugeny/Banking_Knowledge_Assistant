@@ -180,6 +180,9 @@ def chunk_to_metadata(chunk: dict) -> dict:
         "as_of_date":      chunk.get("as_of_date", ""),
         "char_count":      int(chunk.get("char_count", 0)),
         "order_in_doc":    int(chunk.get("order_in_doc", 0)),
+        "contains_table":  bool(chunk.get("contains_table", False)),
+        "table_ids":       ",".join(chunk.get("table_ids", [])),
+        "table_summary":   chunk.get("table_summary", ""),
     }
 
 

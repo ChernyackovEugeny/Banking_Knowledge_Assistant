@@ -24,6 +24,7 @@ from datetime import datetime, timezone
 
 from db_logging.log_utils import log_alias
 from parsers.base import Section
+from tables import iter_table_blocks
 
 logger = logging.getLogger(__name__)
 
@@ -41,7 +42,11 @@ def flatten_sections(sections: list[Section], *, doc_id: str) -> dict[str, dict]
     for sec in sections:
         if sec.id in result:
             raise ValueError(f"{doc_id}: duplicate section_id in flat index: {sec.id}")
-        result[sec.id] = {"title": sec.title, "text": sec.text}
+        result[sec.id] = {
+            "title": sec.title,
+            "text": sec.text,
+            **_basic_table_metadata(sec.text),
+        }
         if sec.children:
             child_flat = flatten_sections(sec.children, doc_id=doc_id)
             duplicate_ids = sorted(set(result).intersection(child_flat))
@@ -76,6 +81,7 @@ def _build_sections_tree(
             "path": current_path,
             "title": sec.title,
             "text": sec.text,
+            "metadata": _basic_table_metadata(sec.text),
             "char_count": len(sec.text),
             "is_leaf": len(sec.children) == 0,
             "children": children_nodes,
@@ -85,6 +91,29 @@ def _build_sections_tree(
         "doc_id": doc_id,
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "sections": [_walk(sec, None, [], 1) for sec in sections],
+    }
+
+
+def _basic_table_metadata(text: str) -> dict:
+    """Базовая metadata по таблицам без LLM-enrichment."""
+    blocks = iter_table_blocks(text)
+    if not blocks:
+        return {}
+
+    tables = []
+    for block in blocks:
+        column_count = max(0, block.header.count("|") - 1)
+        tables.append({
+            "table_id": block.table_id,
+            "row_count": len(block.rows),
+            "column_count": column_count,
+            "summary": "",
+        })
+
+    return {
+        "contains_table": True,
+        "tables": tables,
+        "table_summary": "",
     }
 
 

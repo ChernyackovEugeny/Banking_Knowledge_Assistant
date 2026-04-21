@@ -132,6 +132,7 @@ function EmptyState({ msg }: { msg: string }) {
   )
 }
 
+
 // ──────────────────────────────────────────────────────────────────────────
 // Tab: Chat
 // ──────────────────────────────────────────────────────────────────────────
@@ -484,8 +485,9 @@ function ParsingTab({ sessions }: { sessions: ParseSession[] }) {
 function GenSessionRow({ s }: { s: GenSession }) {
   const scriptColor: Record<string, string> = {
     generating: 'bg-brand-100 text-brand-700',
-    questions:  'bg-purple-100 text-purple-700',
-    validator:  'bg-teal-100 text-teal-700',
+    questions: 'bg-purple-100 text-purple-700',
+    validator: 'bg-teal-100 text-teal-700',
+    table_enrichment: 'bg-amber-100 text-amber-700',
   }
   return (
     <tr className="hover:bg-gray-50 text-xs">
@@ -547,16 +549,25 @@ function ArtifactsSection({ artifacts }: { artifacts: ArtifactsData | null }) {
   if (!artifacts) return null
 
   const { parsed_docs, generated_docs, questions, chunks } = artifacts
+  const enrichmentRate = parsed_docs.summary.total_tables > 0
+    ? Math.round((parsed_docs.summary.enriched_tables / parsed_docs.summary.total_tables) * 100)
+    : 0
 
   return (
     <div className="space-y-6">
       <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-4">
-        <SectionTitle>Артефакты данных: parsed / generated / questions / chunks</SectionTitle>
-        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+        <SectionTitle>Артефакты данных: parsed / enrichment / generated / questions / chunks</SectionTitle>
+        <div className="grid grid-cols-2 xl:grid-cols-5 gap-3">
           <StatCard
             label="Parsed docs"
             value={fmtInt(parsed_docs.summary.files_count)}
             sub={`avg ${fmtInt(Math.round(parsed_docs.summary.avg_chars))} chars, ${fmtInt(Math.round(parsed_docs.summary.avg_tokens))} tokens`}
+          />
+          <StatCard
+            label="Tables"
+            value={fmtInt(parsed_docs.summary.total_tables)}
+            sub={`${fmtInt(parsed_docs.summary.enriched_tables)} enriched in ${fmtInt(parsed_docs.summary.docs_enriched)} docs`}
+            accent={parsed_docs.summary.total_tables > 0 && parsed_docs.summary.enriched_tables < parsed_docs.summary.total_tables ? 'warning' : 'ok'}
           />
           <StatCard
             label="Generated docs"
@@ -571,12 +582,44 @@ function ArtifactsSection({ artifacts }: { artifacts: ArtifactsData | null }) {
           <StatCard
             label="Chunks"
             value={fmtInt(chunks.summary.total_chunks)}
-            sub={`${fmtInt(chunks.summary.total_indexed_chunks)} indexed, avg ${fmtInt(Math.round(chunks.summary.avg_tokens))} tokens`}
+            sub={`${fmtInt(chunks.summary.total_indexed_chunks)} indexed, avg ${fmtInt(Math.round(chunks.summary.avg_tokens_per_chunk))} tokens/chunk`}
           />
         </div>
         <p className="text-xs text-gray-400 mt-3">
           Токены в этой секции оценочные (approx), для оперативного мониторинга объёмов.
         </p>
+      </div>
+
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+        <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-4">
+          <SectionTitle>Enrichment Coverage</SectionTitle>
+          <div className="space-y-2 text-sm">
+            <div className="flex items-center justify-between">
+              <span className="text-gray-500">Docs with tables</span>
+              <span className="font-semibold text-gray-800">{fmtInt(parsed_docs.summary.docs_with_tables)}</span>
+            </div>
+            <div className="flex items-center justify-between">
+              <span className="text-gray-500">Docs enriched</span>
+              <span className="font-semibold text-gray-800">{fmtInt(parsed_docs.summary.docs_enriched)}</span>
+            </div>
+            <div className="flex items-center justify-between">
+              <span className="text-gray-500">Sections with tables</span>
+              <span className="font-semibold text-gray-800">{fmtInt(parsed_docs.summary.sections_with_tables)}</span>
+            </div>
+            <div className="flex items-center justify-between">
+              <span className="text-gray-500">Sections enriched</span>
+              <span className="font-semibold text-gray-800">{fmtInt(parsed_docs.summary.sections_enriched)}</span>
+            </div>
+          </div>
+        </div>
+
+        <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-4 md:col-span-2">
+          <SectionTitle>Enrichment Readiness</SectionTitle>
+          <PassRateBar rate={enrichmentRate} />
+          <p className="text-xs text-gray-500 mt-3">
+            Таблицы с заполненными `metadata.tables[].summary` относительно всех таблиц, найденных в `data/parsed`.
+          </p>
+        </div>
       </div>
 
       <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
@@ -590,6 +633,8 @@ function ArtifactsSection({ artifacts }: { artifacts: ArtifactsData | null }) {
                 <tr>
                   <th className="px-4 py-2 text-left font-medium">Doc</th>
                   <th className="px-4 py-2 text-right font-medium">Sections</th>
+                  <th className="px-4 py-2 text-right font-medium">Tables</th>
+                  <th className="px-4 py-2 text-right font-medium">Enriched</th>
                   <th className="px-4 py-2 text-right font-medium">Chars</th>
                   <th className="px-4 py-2 text-right font-medium">Tokens</th>
                 </tr>
@@ -599,6 +644,8 @@ function ArtifactsSection({ artifacts }: { artifacts: ArtifactsData | null }) {
                   <tr key={d.doc_id} className="hover:bg-gray-50">
                     <td className="px-4 py-2 font-mono text-brand-700">{d.doc_id}</td>
                     <td className="px-4 py-2 text-right text-gray-600">{fmtInt(d.sections_count)}</td>
+                    <td className="px-4 py-2 text-right text-gray-600">{fmtInt(d.tables_count)}</td>
+                    <td className="px-4 py-2 text-right text-gray-600">{fmtInt(d.enriched_tables_count)}</td>
                     <td className="px-4 py-2 text-right text-gray-700">{fmtInt(d.chars)}</td>
                     <td className="px-4 py-2 text-right text-gray-500">{fmtInt(d.tokens)}</td>
                   </tr>

@@ -1,20 +1,20 @@
-"""РџР°Р№РїР»Р°Р№РЅ РїР°СЂСЃРёРЅРіР° СЂРµР°Р»СЊРЅС‹С… РЅРѕСЂРјР°С‚РёРІРЅС‹С… Р°РєС‚РѕРІ.
+"""Пайплайн парсинга реальных нормативных актов.
 
-Р§РёС‚Р°РµС‚ real_documents[] РёР· config.yaml, РґР»СЏ РєР°Р¶РґРѕРіРѕ РґРѕРєСѓРјРµРЅС‚Р°:
-  1. РЎРєР°С‡РёРІР°РµС‚ РёР· СЂРµРµСЃС‚СЂР° РёСЃС‚РѕС‡РЅРёРєРѕРІ (registry.py) СЃ РґРёСЃРєРѕРІС‹Рј РєСЌС€РµРј.
-  2. РР·РІР»РµРєР°РµС‚ С‚РµРєСЃС‚ (HTML / PDF / ODT).
-  3. Р Р°Р·Р±РёРІР°РµС‚ РЅР° СЃРµРєС†РёРё (РїР°СЂСЃРµСЂС‹ Р¤Р—, Р¦Р‘ Рё СЃРїРµС†-РґРѕРєСѓРјРµРЅС‚РѕРІ).
-  4. РЎРѕС…СЂР°РЅСЏРµС‚ РІ data/parsed/{doc_id}_sections.json Рё sections_tree.json.
+Читает real_documents[] из config.yaml, для каждого документа:
+  1. Скачивает из реестра источников (registry.py) с дисковым кэшем.
+  2. Извлекает текст (HTML / PDF / ODT).
+  3. Разбивает на секции (парсеры ФЗ, ЦБ и спец-документов).
+  4. Сохраняет в data/parsed/{doc_id}_sections.json и sections_tree.json.
 
-Р’С‹С…РѕРґРЅС‹Рµ С„Р°Р№Р»С‹ РїРѕС‚СЂРµР±Р»СЏСЋС‚СЃСЏ generating.py РґР»СЏ РёРЅСЉРµРєС†РёРё СЂРµР°Р»СЊРЅРѕРіРѕ С‚РµРєСЃС‚Р° РќРџРђ
-РІ РїСЂРѕРјРїС‚С‹ РіРµРЅРµСЂР°С†РёРё СЃРёРЅС‚РµС‚РёС‡РµСЃРєРёС… СЂРµРіР»Р°РјРµРЅС‚РѕРІ.
+Выходные файлы потребляются generating.py для инъекции реального текста НПА
+в промпты генерации синтетических регламентов.
 
 CLI:
-  python parsing.py                       # РїСЂРѕРїСѓСЃС‚РёС‚СЊ СѓР¶Рµ СЃРїР°СЂСЃРµРЅРЅС‹Рµ
-  python parsing.py --force               # РїРµСЂРµРїР°СЂСЃРёС‚СЊ РІСЃРµ
-  python parsing.py --only 115-FZ 590-P  # С‚РѕР»СЊРєРѕ СѓРєР°Р·Р°РЅРЅС‹Рµ
-  python parsing.py --fetch-force         # СЃР±СЂРѕСЃРёС‚СЊ HTTP-РєСЌС€ РїСЂРё СЃРєР°С‡РёРІР°РЅРёРё
-  python parsing.py --log-level DEBUG     # РґРµС‚Р°Р»СЊРЅС‹Р№ Р»РѕРі
+  python parsing.py                       # пропустить уже спарсенные
+  python parsing.py --force               # перепарсить все
+  python parsing.py --only 115-FZ 590-P  # только указанные
+  python parsing.py --fetch-force         # сбросить HTTP-кэш при скачивании
+  python parsing.py --log-level DEBUG     # детальный лог
 """
 from __future__ import annotations
 
@@ -24,8 +24,8 @@ import sys
 from pathlib import Path
 
 # ---------------------------------------------------------------------------
-# РќР°СЃС‚СЂРѕР№РєР° РїСѓС‚РµР№ - РґРѕР±Р°РІР»СЏРµРј РґРёСЂРµРєС‚РѕСЂРёСЋ parsing/ РІ sys.path, С‡С‚РѕР±С‹ СЂР°Р±РѕС‚Р°Р»Рё
-# РёРјРїРѕСЂС‚С‹ СЃРѕСЃРµРґРЅРёС… РјРѕРґСѓР»РµР№ (fetcher, registry Рё С‚.Рґ.)
+# Настройка путей - добавляем директорию parsing/ в sys.path, чтобы работали
+# импорты соседних модулей (fetcher, registry и т.д.)
 # ---------------------------------------------------------------------------
 _THIS_DIR = Path(__file__).resolve().parent
 if str(_THIS_DIR) not in sys.path:
@@ -36,13 +36,13 @@ CONFIG_PATH = ROOT_DIR / "public" / "config.yaml"
 PARSED_DIR = ROOT_DIR / "data" / "parsed"
 CACHE_DIR = ROOT_DIR / "data" / "fetch_cache"
 
-# Р”РёСЂРµРєС‚РѕСЂРёСЏ РґР»СЏ СЂСѓС‡РЅС‹С… PDF/ODT-С„Р°Р№Р»РѕРІ.
-# Р•СЃР»Рё РїРѕР»РѕР¶РёС‚СЊ СЃСЋРґР° С„Р°Р№Р» {doc_id}.odt РёР»Рё {doc_id}.pdf, РѕРЅ Р±СѓРґРµС‚ РёСЃРїРѕР»СЊР·РѕРІР°РЅ
-# РєР°Рє РёСЃС‚РѕС‡РЅРёРє СЃ РЅР°РёРІС‹СЃС€РёРј РїСЂРёРѕСЂРёС‚РµС‚РѕРј.
+# Директория для ручных PDF/ODT-файлов.
+# Если положить сюда файл {doc_id}.odt или {doc_id}.pdf, он будет использован
+# как источник с наивысшим приоритетом.
 MANUAL_PDF_DIR = ROOT_DIR / "data" / "manual_pdfs"
 
 # ---------------------------------------------------------------------------
-# РўРµРїРµСЂСЊ РјРѕР¶РЅРѕ РёРјРїРѕСЂС‚РёСЂРѕРІР°С‚СЊ Р»РѕРєР°Р»СЊРЅС‹Рµ РјРѕРґСѓР»Рё
+# Теперь можно импортировать локальные модули
 # ---------------------------------------------------------------------------
 import os  # noqa: E402
 import yaml  # noqa: E402
@@ -63,7 +63,7 @@ from postprocessing.output import save_sections  # noqa: E402
 from registry import SOURCES  # noqa: E402
 
 # ---------------------------------------------------------------------------
-# РњР°РїРїРёРЅРі subtype -> РєР»Р°СЃСЃ РїР°СЂСЃРµСЂР°
+# Маппинг subtype -> класс парсера
 # ---------------------------------------------------------------------------
 
 PARSER_BY_SUBTYPE: dict[str, type[AbstractSectionParser]] = {
@@ -71,15 +71,41 @@ PARSER_BY_SUBTYPE: dict[str, type[AbstractSectionParser]] = {
     "cb_regulations": CBRDocumentParser,
 }
 
-# Р”РѕРєСѓРјРµРЅС‚С‹ СЃ РЅРµСЃС‚Р°РЅРґР°СЂС‚РЅРѕР№ СЃС‚СЂСѓРєС‚СѓСЂРѕР№ - РїРµСЂРµРѕРїСЂРµРґРµР»СЏРµРј РїР°СЂСЃРµСЂ
+# Документы с нестандартной структурой - переопределяем парсер
 PARSER_OVERRIDE: dict[str, type[AbstractSectionParser]] = {
     "579-P": PlanOfAccountsParser,
     "6406-U": ReportingFormsParser,
 }
 
 
+def validate_sections(doc_id: str, sections: list) -> None:
+    """Минимальная семантическая валидация результата парсинга.
+
+    Ошибки здесь должны означать, что технический parse завершился, но структура
+    документа непригодна для downstream-этапов.
+    """
+    if not sections:
+        raise ValueError(f"{doc_id}: parser returned no sections")
+
+    if doc_id == "579-P":
+        if len(sections) < 3:
+            raise ValueError(f"{doc_id}: too few top-level sections ({len(sections)})")
+
+        empty = [sec.id for sec in sections if not (sec.text or "").strip()]
+        if empty:
+            raise ValueError(f"{doc_id}: empty top-level sections: {', '.join(empty[:10])}")
+
+        largest = max(len(sec.text or "") for sec in sections)
+        total = sum(len(sec.text or "") for sec in sections) or 1
+        if largest / total > 0.85:
+            raise ValueError(
+                f"{doc_id}: one section dominates the whole document "
+                f"({largest} of {total} chars)"
+            )
+
+
 # ---------------------------------------------------------------------------
-# Р—Р°РіСЂСѓР·РєР° РєРѕРЅС„РёРіР°
+# Загрузка конфига
 # ---------------------------------------------------------------------------
 
 def load_config() -> dict:
@@ -88,7 +114,7 @@ def load_config() -> dict:
 
 
 def collect_wanted_ids(config: dict, doc_id: str) -> list[str]:
-    """РЎРѕР±РёСЂР°РµС‚ РІСЃРµ sec_id РёР· references СЃРёРЅС‚РµС‚РёС‡РµСЃРєРёС… РґРѕРєСѓРјРµРЅС‚РѕРІ, СЃСЃС‹Р»Р°СЋС‰РёС…СЃСЏ РЅР° doc_id."""
+    """Собирает все sec_id из references синтетических документов, ссылающихся на doc_id."""
     wanted: list[str] = []
     for doc_spec in config.get("documents", []):
         for ref in doc_spec.get("references", []):
@@ -104,11 +130,11 @@ def collect_wanted_ids(config: dict, doc_id: str) -> list[str]:
 
 
 def extract_garant_id(url: str) -> str | None:
-    """РР·РІР»РµРєР°РµС‚ С‡РёСЃР»РѕРІРѕР№ ID РґРѕРєСѓРјРµРЅС‚Р° РёР· base.garant.ru URL.
+    """Извлекает числовой ID документа из base.garant.ru URL.
 
-    Р Р°Р±РѕС‚Р°РµС‚ С‚РѕР»СЊРєРѕ СЃ base.garant.ru, РїРѕС‚РѕРјСѓ С‡С‚Рѕ РёРјРµРЅРЅРѕ СЌС‚РѕС‚ ID РёСЃРїРѕР»СЊР·СѓРµС‚СЃСЏ
-    РІ ivo.garant.ru РґР»СЏ Р·Р°РіСЂСѓР·РєРё С„Р°Р№Р»Р°. PRIME-СЃС‚СЂР°РЅРёС†С‹ (garant.ru/products/ipo/prime/)
-    РёРјРµСЋС‚ СЃРѕР±СЃС‚РІРµРЅРЅСѓСЋ РЅСѓРјРµСЂР°С†РёСЋ, РѕС‚Р»РёС‡РЅСѓСЋ РѕС‚ base.garant.ru.
+    Работает только с base.garant.ru, потому что именно этот ID используется
+    в ivo.garant.ru для загрузки файла. PRIME-страницы (garant.ru/products/ipo/prime/)
+    имеют собственную нумерацию, отличную от base.garant.ru.
     """
     import re
 
@@ -119,7 +145,7 @@ def extract_garant_id(url: str) -> str | None:
 
 
 # ---------------------------------------------------------------------------
-# РџР°СЂСЃРёРЅРі РѕРґРЅРѕРіРѕ РґРѕРєСѓРјРµРЅС‚Р°
+# Парсинг одного документа
 # ---------------------------------------------------------------------------
 
 def parse_document(
@@ -132,35 +158,35 @@ def parse_document(
     run_log: RunLogger | None = None,
     garant_playwright: object = None,
 ) -> str:
-    """РџР°СЂСЃРёС‚ РѕРґРёРЅ РґРѕРєСѓРјРµРЅС‚ Рё СЃРѕС…СЂР°РЅСЏРµС‚ sections.json.
+    """Парсит один документ и сохраняет sections.json.
 
     Args:
-        doc_id: РРґРµРЅС‚РёС„РёРєР°С‚РѕСЂ СЂРµР°Р»СЊРЅРѕРіРѕ РґРѕРєСѓРјРµРЅС‚Р°, РЅР°РїСЂРёРјРµСЂ ``115-FZ``.
-        doc_meta: РњРµС‚Р°РґР°РЅРЅС‹Рµ РґРѕРєСѓРјРµРЅС‚Р° РёР· ``config.yaml``.
-        config: РџРѕР»РЅС‹Р№ РѕР±СЉРµРєС‚ РєРѕРЅС„РёРіСѓСЂР°С†РёРё РёР· ``public/config.yaml``.
-        force_parse: Р•СЃР»Рё ``True``, РїР°СЂСЃРёРЅРі РІС‹РїРѕР»РЅСЏРµС‚СЃСЏ РґР°Р¶Рµ РїСЂРё СЃСѓС‰РµСЃС‚РІСѓСЋС‰РµРј
+        doc_id: Идентификатор реального документа, например ``115-FZ``.
+        doc_meta: Метаданные документа из ``config.yaml``.
+        config: Полный объект конфигурации из ``public/config.yaml``.
+        force_parse: Если ``True``, парсинг выполняется даже при существующем
             ``data/parsed/{doc_id}_sections.json``.
-        fetch_force: Р•СЃР»Рё ``True``, СЃРµС‚РµРІРѕР№ СЃР»РѕР№ РёРіРЅРѕСЂРёСЂСѓРµС‚ HTTP-РєСЌС€ Рё
-            РїРµСЂРµРєР°С‡РёРІР°РµС‚ РёСЃС‚РѕС‡РЅРёРє Р·Р°РЅРѕРІРѕ.
-        run_log: Р­РєР·РµРјРїР»СЏСЂ ``RunLogger`` РґР»СЏ DB-Р»РѕРіРёСЂРѕРІР°РЅРёСЏ. Р•СЃР»Рё ``None``,
-            Р»РѕРіРёСЂРѕРІР°РЅРёРµ РІ PostgreSQL РѕС‚РєР»СЋС‡РµРЅРѕ.
-        garant_playwright: Р­РєР·РµРјРїР»СЏСЂ ``GarantPlaywrightDownloader`` РґР»СЏ
-            Р±СЂР°СѓР·РµСЂРЅРѕРіРѕ РґРѕСЃС‚СѓРїР° Рє Р·Р°РєСЂС‹С‚С‹Рј РґРѕРєСѓРјРµРЅС‚Р°Рј Garant. РњРѕР¶РµС‚ Р±С‹С‚СЊ ``None``.
+        fetch_force: Если ``True``, сетевой слой игнорирует HTTP-кэш и
+            перекачивает источник заново.
+        run_log: Экземпляр ``RunLogger`` для DB-логирования. Если ``None``,
+            логирование в PostgreSQL отключено.
+        garant_playwright: Экземпляр ``GarantPlaywrightDownloader`` для
+            браузерного доступа к закрытым документам Garant. Может быть ``None``.
 
     Returns:
-        РЎС‚СЂРѕРєР° СЃС‚Р°С‚СѓСЃР° РѕР±СЂР°Р±РѕС‚РєРё РґРѕРєСѓРјРµРЅС‚Р°:
-            - ``'ok'``: СѓСЃРїРµС€РЅРѕ СЂР°СЃРїР°СЂСЃРµРЅРѕ РёР· РѕРЅР»Р°Р№РЅ-РёСЃС‚РѕС‡РЅРёРєР° РёР»Рё Playwright
-            - ``'skipped'``: РїСЂРѕРїСѓС‰РµРЅРѕ, СЂРµР·СѓР»СЊС‚Р°С‚ СѓР¶Рµ СЃСѓС‰РµСЃС‚РІСѓРµС‚ Рё РЅРµС‚ ``--force``
-            - ``'manual_pdf'``: СѓСЃРїРµС€РЅРѕ СЂР°СЃРїР°СЂСЃРµРЅРѕ РёР· СЂСѓС‡РЅРѕРіРѕ ``.odt`` РёР»Рё ``.pdf``
-            - ``'failed'``: РІСЃРµ РёСЃС‚РѕС‡РЅРёРєРё РёСЃС‡РµСЂРїР°РЅС‹, РґРѕРєСѓРјРµРЅС‚ РЅРµ СЂР°СЃРїР°СЂСЃРµРЅ
-            - ``'no_sources'``: РґР»СЏ ``doc_id`` РЅРµС‚ РёСЃС‚РѕС‡РЅРёРєРѕРІ РІ ``registry.py``
-            - ``'no_parser'``: РЅРµ РЅР°Р№РґРµРЅ РїР°СЂСЃРµСЂ РґР»СЏ ``doc_subtype`` РґРѕРєСѓРјРµРЅС‚Р°
+        Строка статуса обработки документа:
+            - ``'ok'``: успешно распарсено из онлайн-источника или Playwright
+            - ``'skipped'``: пропущено, результат уже существует и нет ``--force``
+            - ``'manual_pdf'``: успешно распарсено из ручного ``.odt`` или ``.pdf``
+            - ``'failed'``: все источники исчерпаны, документ не распарсен
+            - ``'no_sources'``: для ``doc_id`` нет источников в ``registry.py``
+            - ``'no_parser'``: не найден парсер для ``doc_subtype`` документа
     """
     import time as _time
 
     out_path = PARSED_DIR / f"{doc_id}_sections.json"
     if not force_parse and out_path.exists():
-        logging.info("SKIP %s - СѓР¶Рµ СЃРїР°СЂСЃРµРЅ (%s)", doc_id, out_path.name)
+        logging.info("SKIP %s - уже спарсен (%s)", doc_id, out_path.name)
         if run_log:
             op_id = run_log.start_operation(doc_id, doc_meta)
             run_log.end_operation(op_id, status="skipped")
@@ -170,7 +196,7 @@ def parse_document(
 
     sources = SOURCES.get(doc_id, [])
     if not sources:
-        logging.warning("WARN %s - РЅРµС‚ РёСЃС‚РѕС‡РЅРёРєРѕРІ РІ registry.py", doc_id)
+        logging.warning("WARN %s - нет источников в registry.py", doc_id)
         if run_log and op_id:
             run_log.end_operation(op_id, status="no_sources")
         return "no_sources"
@@ -178,7 +204,7 @@ def parse_document(
     subtype = doc_meta.get("doc_subtype", "")
     parser_cls = PARSER_OVERRIDE.get(doc_id) or PARSER_BY_SUBTYPE.get(subtype)
     if not parser_cls:
-        logging.warning("WARN %s - РЅРµРёР·РІРµСЃС‚РЅС‹Р№ doc_subtype=%r, РїСЂРѕРїСѓСЃРєР°РµРј", doc_id, subtype)
+        logging.warning("WARN %s - неизвестный doc_subtype=%r, пропускаем", doc_id, subtype)
         if run_log and op_id:
             run_log.end_operation(op_id, status="no_parser")
         return "no_parser"
@@ -186,7 +212,7 @@ def parse_document(
     wanted_ids = collect_wanted_ids(config, doc_id)
     last_error: Exception | None = None
 
-    # РџСЂРёРѕСЂРёС‚РµС‚ 0: СЂСѓС‡РЅС‹Рµ С„Р°Р№Р»С‹ РІ data/manual_pdfs/
+    # Приоритет 0: ручные файлы в data/manual_pdfs/
     _manual_candidates = [
         (MANUAL_PDF_DIR / f"{doc_id}.odt", "ODT"),
         (MANUAL_PDF_DIR / f"{doc_id}.pdf", "PDF"),
@@ -194,7 +220,7 @@ def parse_document(
     for manual_file, fmt_name in _manual_candidates:
         if not manual_file.exists():
             continue
-        logging.info("РќР°Р№РґРµРЅ СЂСѓС‡РЅРѕР№ %s: %s", fmt_name, manual_file)
+        logging.info("Найден ручной %s: %s", fmt_name, manual_file)
         try:
             raw_bytes = manual_file.read_bytes()
             if fmt_name == "ODT":
@@ -207,6 +233,7 @@ def parse_document(
                 raw_doc = PyMuPDFExtractor().extract(raw_bytes, str(manual_file))
 
             sections = parser_cls().parse(raw_doc)
+            validate_sections(doc_id, sections)
             if sections:
                 path = save_sections(
                     doc_id,
@@ -217,7 +244,7 @@ def parse_document(
                     run_log=run_log,
                 )
                 logging.info(
-                    "OK %s -> %s (%d СЃРµРєС†РёР№, СЂСѓС‡РЅРѕР№ %s)",
+                    "OK %s -> %s (%d секций, ручной %s)",
                     doc_id,
                     path.name,
                     len(sections),
@@ -226,9 +253,9 @@ def parse_document(
                 log_operation_manual_pdf(run_log, op_id, manual_file, parser_cls, sections, len(wanted_ids))
                 return "manual_pdf"
         except Exception as exc:
-            logging.warning("Р СѓС‡РЅРѕР№ %s РЅРµ СѓРґР°Р»РѕСЃСЊ СЂР°СЃРїР°СЂСЃРёС‚СЊ (%s): %s", fmt_name, manual_file, exc)
+            logging.warning("Ручной %s не удалось распарсить (%s): %s", fmt_name, manual_file, exc)
 
-    # РџСЂРёРѕСЂРёС‚РµС‚ 0.5a: Playwright РґР»СЏ Garant
+    # Приоритет 0.5a: Playwright для Garant
     if garant_playwright is not None:
         garant_id: str | None = None
         for spec in sources:
@@ -241,10 +268,11 @@ def parse_document(
             try:
                 raw_doc = garant_playwright.get_document(garant_id)
                 sections = parser_cls().parse(raw_doc)
+                validate_sections(doc_id, sections)
 
-                # Р”Р»СЏ HTML-РёР·РІР»РµС‡РµРЅРёСЏ (РЅРµ ODT/PDF) С‚СЂРµР±СѓРµРј РјРёРЅРёРјСѓРј 3 СЃРµРєС†РёРё вЂ”
-                # РёРЅР°С‡Рµ СЌС‚Рѕ СЃРєРѕСЂРµРµ РІСЃРµРіРѕ СЃС‚СЂР°РЅРёС†Р° СЃ РѕРіР»Р°РІР»РµРЅРёРµРј Р±РµР· РїРѕР»РЅРѕРіРѕ С‚РµРєСЃС‚Р°.
-                # ODT Рё PDF СЃ Р»СЋР±С‹Рј РєРѕР»РёС‡РµСЃС‚РІРѕРј СЃРµРєС†РёР№ СЃС‡РёС‚Р°СЋС‚СЃСЏ РґРѕСЃС‚РѕРІРµСЂРЅС‹РјРё.
+                # Для HTML-извлечения (не ODT/PDF) требуем минимум 3 секции —
+                # иначе это скорее всего страница с оглавлением без полного текста.
+                # ODT и PDF с любым количеством секций считаются достоверными.
                 is_html = not (raw_doc.is_odt or raw_doc.is_pdf)
                 if sections and (not is_html or len(sections) >= 3):
                     path = save_sections(
@@ -255,7 +283,7 @@ def parse_document(
                         op_id=op_id,
                         run_log=run_log,
                     )
-                    logging.info("OK %s -> %s (%d СЃРµРєС†РёР№, Playwright)", doc_id, path.name, len(sections))
+                    logging.info("OK %s -> %s (%d секций, Playwright)", doc_id, path.name, len(sections))
                     log_operation_playwright_ok(
                         run_log,
                         op_id,
@@ -267,18 +295,17 @@ def parse_document(
                     return "ok"
                 elif sections and is_html:
                     logging.warning(
-                        "Playwright HTML РґР»СЏ %s РґР°Р» С‚РѕР»СЊРєРѕ %d СЃРµРєС†РёР№ вЂ” "
-                        "РІРµСЂРѕСЏС‚РЅРѕ, РѕРіР»Р°РІР»РµРЅРёРµ Р±РµР· РїРѕР»РЅРѕРіРѕ С‚РµРєСЃС‚Р°, РїСЂРѕР±СѓРµРј HTTP-РёСЃС‚РѕС‡РЅРёРєРё.",
+                        "Playwright HTML для %s дал только %d секций — "
+                        "вероятно, оглавление без полного текста, пробуем HTTP-источники.",
                         doc_id, len(sections),
                     )
             except Exception as exc:
-                logging.warning("Garant Playwright РѕС€РёР±РєР° РґР»СЏ %s: %s", doc_id, exc)
-                log_operation_fail(run_log, op_id, len(sources), exc)
-                return "failed"
+                logging.warning("Garant Playwright ошибка для %s: %s", doc_id, exc)
+                last_error = exc
         else:
-            logging.debug("Garant Playwright: РЅРµС‚ Garant ID РІ РёСЃС‚РѕС‡РЅРёРєР°С… РґР»СЏ %s", doc_id)
+            logging.debug("Garant Playwright: нет Garant ID в источниках для %s", doc_id)
 
-    # Fallback: РѕР±С‹С‡РЅР°СЏ Р·Р°РіСЂСѓР·РєР° РёСЃС‚РѕС‡РЅРёРєРѕРІ
+    # Fallback: обычная загрузка источников
     for attempt_num, spec in enumerate(sources, 1):
         t0 = _time.monotonic()
         try:
@@ -293,15 +320,16 @@ def parse_document(
             extractor = spec.extractor_cls()
             raw_doc = extractor.extract(raw_bytes, spec.url)
             if not raw_doc.text.strip():
-                raise ValueError("Р­РєСЃС‚СЂР°РєС‚РѕСЂ РІРµСЂРЅСѓР» РїСѓСЃС‚РѕР№ С‚РµРєСЃС‚")
+                raise ValueError("Экстрактор вернул пустой текст")
 
             parser = parser_cls()
             sections = parser.parse(raw_doc)
+            validate_sections(doc_id, sections)
 
             if not sections:
                 raise ValueError(
-                    f"РџР°СЂСЃРµСЂ {parser_cls.__name__} РЅРµ РЅР°С€РµР» СЃРµРєС†РёР№. "
-                    "Р’РѕР·РјРѕР¶РЅРѕ, СЂР°Р·РјРµС‚РєР° РёСЃС‚РѕС‡РЅРёРєР° РёР·РјРµРЅРёР»Р°СЃСЊ."
+                    f"Парсер {parser_cls.__name__} не нашел секций. "
+                    "Возможно, разметка источника изменилась."
                 )
 
             path = save_sections(
@@ -312,7 +340,7 @@ def parse_document(
                 op_id=op_id,
                 run_log=run_log,
             )
-            logging.info("OK %s -> %s (%d СЃРµРєС†РёР№)", doc_id, path.name, len(sections))
+            logging.info("OK %s -> %s (%d секций)", doc_id, path.name, len(sections))
             duration_ms = (_time.monotonic() - t0) * 1000
             log_source_ok(run_log, op_id, doc_id, spec, attempt_num, duration_ms, sections, parser_cls, len(wanted_ids))
             return "ok"
@@ -324,7 +352,7 @@ def parse_document(
             last_error = exc
             continue
 
-    logging.error("FAIL %s - РІСЃРµ РёСЃС‚РѕС‡РЅРёРєРё РёСЃС‡РµСЂРїР°РЅС‹. РџРѕСЃР»РµРґРЅСЏСЏ РѕС€РёР±РєР°: %s", doc_id, last_error)
+    logging.error("FAIL %s - все источники исчерпаны. Последняя ошибка: %s", doc_id, last_error)
     log_operation_fail(run_log, op_id, len(sources), last_error)
     return "failed"
 
@@ -335,40 +363,40 @@ def parse_document(
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
-        description="РџР°СЂСЃРёРЅРі СЂРµР°Р»СЊРЅС‹С… РЅРѕСЂРјР°С‚РёРІРЅС‹С… Р°РєС‚РѕРІ РІ data/parsed/",
+        description="Парсинг реальных нормативных актов в data/parsed/",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
-РїСЂРёРјРµСЂС‹:
-  python parsing.py                        # РїСЂРѕРїСѓСЃС‚РёС‚СЊ СѓР¶Рµ СЃРїР°СЂСЃРµРЅРЅС‹Рµ
-  python parsing.py --force                # РїРµСЂРµРїР°СЂСЃРёС‚СЊ РІСЃРµ
-  python parsing.py --only 115-FZ 590-P   # С‚РѕР»СЊРєРѕ СѓРєР°Р·Р°РЅРЅС‹Рµ РґРѕРєСѓРјРµРЅС‚С‹
-  python parsing.py --fetch-force          # СЃР±СЂРѕСЃРёС‚СЊ HTTP-РєСЌС€
-  python parsing.py --log-level DEBUG      # РґРµС‚Р°Р»СЊРЅС‹Р№ Р»РѕРі
+примеры:
+  python parsing.py                        # пропустить уже спарсенные
+  python parsing.py --force                # перепарсить все
+  python parsing.py --only 115-FZ 590-P   # только указанные документы
+  python parsing.py --fetch-force          # сбросить HTTP-кэш
+  python parsing.py --log-level DEBUG      # детальный лог
         """,
     )
     p.add_argument(
         "--force",
         action="store_true",
-        help="РџРµСЂРµРїР°СЂСЃРёС‚СЊ РІСЃРµ РґРѕРєСѓРјРµРЅС‚С‹, РґР°Р¶Рµ РµСЃР»Рё sections.json СѓР¶Рµ СЃСѓС‰РµСЃС‚РІСѓРµС‚",
+        help="Перепарсить все документы, даже если sections.json уже существует",
     )
     p.add_argument(
         "--only",
         nargs="+",
         metavar="DOC_ID",
-        help="РџР°СЂСЃРёС‚СЊ С‚РѕР»СЊРєРѕ СѓРєР°Р·Р°РЅРЅС‹Рµ doc_id, РЅР°РїСЂРёРјРµСЂ 115-FZ 590-P",
+        help="Парсить только указанные doc_id, например 115-FZ 590-P",
     )
     p.add_argument(
         "--fetch-force",
         action="store_true",
         dest="fetch_force",
-        help="РРіРЅРѕСЂРёСЂРѕРІР°С‚СЊ HTTP-РєСЌС€ Рё РїРµСЂРµРєР°С‡Р°С‚СЊ РґРѕРєСѓРјРµРЅС‚С‹ Р·Р°РЅРѕРІРѕ",
+        help="Игнорировать HTTP-кэш и перекачать документы заново",
     )
     p.add_argument(
         "--log-level",
         default="INFO",
         choices=["DEBUG", "INFO", "WARNING", "ERROR"],
         dest="log_level",
-        help="РЈСЂРѕРІРµРЅСЊ Р»РѕРіРёСЂРѕРІР°РЅРёСЏ (РїРѕ СѓРјРѕР»С‡Р°РЅРёСЋ: INFO)",
+        help="Уровень логирования (по умолчанию: INFO)",
     )
     return p.parse_args()
 
@@ -385,17 +413,17 @@ def main() -> None:
     args = parse_args()
     setup_logging(args.log_level)
 
-    # Р—Р°РіСЂСѓР¶Р°РµРј .env, С‡С‚РѕР±С‹ GARANT_LOGIN / GARANT_PASSWORD Р±С‹Р»Рё РґРѕСЃС‚СѓРїРЅС‹.
+    # Загружаем .env, чтобы GARANT_LOGIN / GARANT_PASSWORD были доступны.
     try:
         from dotenv import load_dotenv
 
         load_dotenv(ROOT_DIR / ".env", override=False)
     except ImportError:
-        pass  # python-dotenv РЅРµ СѓСЃС‚Р°РЅРѕРІР»РµРЅ - РїРµСЂРµРјРµРЅРЅС‹Рµ РґРѕР»Р¶РЅС‹ Р±С‹С‚СЊ СѓР¶Рµ РІ env
+        pass  # python-dotenv не установлен - переменные должны быть уже в env
 
     set_cache_dir(CACHE_DIR)
 
-    # РЎРѕР·РґР°РµРј Garant-Р·Р°РіСЂСѓР·С‡РёРє, РµСЃР»Рё Р·Р°РґР°РЅС‹ СѓС‡РµС‚РЅС‹Рµ РґР°РЅРЅС‹Рµ.
+    # Создаем Garant-загрузчик, если заданы учетные данные.
     garant_playwright = None
     garant_login = os.environ.get("GARANT_LOGIN")
     garant_password = os.environ.get("GARANT_PASSWORD")
@@ -410,11 +438,11 @@ def main() -> None:
             )
         except ImportError:
             logging.warning(
-                "playwright РЅРµ СѓСЃС‚Р°РЅРѕРІР»РµРЅ - Playwright-Р·Р°РіСЂСѓР·С‡РёРє РѕС‚РєР»СЋС‡РµРЅ. "
-                "РЈСЃС‚Р°РЅРѕРІРё: pip install playwright && playwright install chromium"
+                "playwright не установлен - Playwright-загрузчик отключен. "
+                "Установи: pip install playwright && playwright install chromium"
             )
         except Exception as exc:
-            logging.warning("РќРµ СѓРґР°Р»РѕСЃСЊ Р·Р°РїСѓСЃС‚РёС‚СЊ Playwright: %s", exc)
+            logging.warning("Не удалось запустить Playwright: %s", exc)
             if garant_playwright is not None:
                 try:
                     garant_playwright.stop()
@@ -423,23 +451,23 @@ def main() -> None:
             garant_playwright = None
     else:
         logging.debug(
-            "GARANT_LOGIN / GARANT_PASSWORD РЅРµ Р·Р°РґР°РЅС‹ - Р°РІС‚РѕСЂРёР·РѕРІР°РЅРЅРѕРµ СЃРєР°С‡РёРІР°РЅРёРµ Garant РѕС‚РєР»СЋС‡РµРЅРѕ. "
-            "Р”РѕР±Р°РІСЊ РёС… РІ .env РґР»СЏ Р°РІС‚РѕРјР°С‚РёС‡РµСЃРєРѕРіРѕ РїРѕР»СѓС‡РµРЅРёСЏ Р·Р°РєСЂС‹С‚С‹С… РґРѕРєСѓРјРµРЅС‚РѕРІ СЃ garant.ru."
+            "GARANT_LOGIN / GARANT_PASSWORD не заданы - авторизованное скачивание Garant отключено. "
+            "Добавь их в .env для автоматического получения закрытых документов с garant.ru."
         )
 
     config = load_config()
     real_docs: list[dict] = config.get("real_documents", [])
 
     if not real_docs:
-        logging.error("config.yaml РЅРµ СЃРѕРґРµСЂР¶РёС‚ real_documents[]")
+        logging.error("config.yaml не содержит real_documents[]")
         sys.exit(1)
 
-    # Р¤РёР»СЊС‚СЂР°С†РёСЏ РїРѕ --only
+    # Фильтрация по --only
     if args.only:
         only_set = set(args.only)
         real_docs = [d for d in real_docs if d["id"] in only_set]
         if not real_docs:
-            logging.error("РќРё РѕРґРёРЅ РёР· СѓРєР°Р·Р°РЅРЅС‹С… doc_id РЅРµ РЅР°Р№РґРµРЅ РІ real_documents[]")
+            logging.error("Ни один из указанных doc_id не найден в real_documents[]")
             sys.exit(1)
 
     total = len(real_docs)
@@ -484,16 +512,16 @@ def main() -> None:
                 pass
 
     logging.info("=" * 60)
-    logging.info("Р“РѕС‚РѕРІРѕ: %d/%d СѓСЃРїРµС€РЅРѕ", ok, total)
+    logging.info("Готово: %d/%d успешно", ok, total)
     if failed:
-        logging.warning("РќРµ СѓРґР°Р»РѕСЃСЊ: %s", ", ".join(failed))
+        logging.warning("Не удалось: %s", ", ".join(failed))
         logging.warning(
-            "Р”Р»СЏ РЅРµСѓРґР°РІС€РёС…СЃСЏ РґРѕРєСѓРјРµРЅС‚РѕРІ:\n"
-            "  1a. Р•СЃР»Рё РґРѕРєСѓРјРµРЅС‚ Р·Р°РєСЂС‹С‚ Р·Р° Р°РІС‚РѕСЂРёР·Р°С†РёРµР№ РЅР° garant.ru:\n"
-            "      - РІРѕР№РґРё РІ Р°РєРєР°СѓРЅС‚, СЃРєР°С‡Р°Р№ ODT, РїРѕР»РѕР¶Рё РІ data/manual_pdfs/{doc_id}.odt\n"
-            "  1b. РР»Рё СЃРєР°С‡Р°Р№ PDF РІСЂСѓС‡РЅСѓСЋ Рё РїРѕР»РѕР¶Рё РІ data/manual_pdfs/{doc_id}.pdf\n"
-            "      Р—Р°С‚РµРј: python parsing.py --only %s\n"
-            "  2. РР»Рё РѕР±РЅРѕРІРё URL РІ registry.py РґР»СЏ СЌС‚РѕРіРѕ РґРѕРєСѓРјРµРЅС‚Р°",
+            "Для неудавшихся документов:\n"
+            "  1a. Если документ закрыт за авторизацией на garant.ru:\n"
+            "      - войди в аккаунт, скачай ODT, положи в data/manual_pdfs/{doc_id}.odt\n"
+            "  1b. Или скачай PDF вручную и положи в data/manual_pdfs/{doc_id}.pdf\n"
+            "      Затем: python parsing.py --only %s\n"
+            "  2. Или обнови URL в registry.py для этого документа",
             " ".join(failed),
         )
 

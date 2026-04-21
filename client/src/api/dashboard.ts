@@ -126,9 +126,22 @@ export interface ArtifactSummary {
   max_tokens: number
 }
 
+export interface ParsedDocsSummary extends ArtifactSummary {
+  docs_with_tables: number
+  docs_enriched: number
+  sections_with_tables: number
+  sections_enriched: number
+  total_tables: number
+  enriched_tables: number
+}
+
 export interface ParsedDocStat {
   doc_id: string
   sections_count: number
+  sections_with_tables: number
+  sections_enriched: number
+  tables_count: number
+  enriched_tables_count: number
   chars: number
   tokens: number
   updated_at: string
@@ -175,11 +188,12 @@ export interface ChunksSummary extends ArtifactSummary {
   avg_chunks_per_doc: number
   max_chunks_per_doc: number
   total_indexed_chunks: number
+  avg_tokens_per_chunk: number
 }
 
 export interface ArtifactsData {
   parsed_docs: {
-    summary: ArtifactSummary
+    summary: ParsedDocsSummary
     items: ParsedDocStat[]
   }
   generated_docs: {

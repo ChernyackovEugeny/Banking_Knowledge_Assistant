@@ -645,14 +645,23 @@ class GarantPlaywrightDownloader:
             )
 
         cookies = self._page.context.cookies()
-        if not any(c["name"] == "garantId" for c in cookies):
+        cookie_names = {c["name"] for c in cookies}
+        auth_cookie_variants = [
+            {"garantId"},
+            {"g_user_sid", "g_username"},
+            {"g_user_sid"},
+        ]
+        if not any(variant.issubset(cookie_names) for variant in auth_cookie_variants):
             raise GarantPlaywrightAuthError(
-                "Login returned OK, but the garantId cookie was not set. "
-                "The garant.ru auth flow may have changed."
+                "Login returned OK, but no known auth cookies were set "
+                f"(got: {sorted(cookie_names)!r}). The garant.ru auth flow may have changed."
             )
 
         self._logged_in = True
-        logger.debug("GarantPlaywright: authenticated successfully, garantId cookie found")
+        logger.debug(
+            "GarantPlaywright: authenticated successfully, auth cookies found: %s",
+            ", ".join(sorted(name for name in cookie_names if name in {"garantId", "g_user_sid", "g_username"})),
+        )
 
     def _dismiss_paywall(self) -> None:
         """Click the 'open full document' control if it is present."""

@@ -6,6 +6,7 @@ import re
 
 from extractors.base import RawDocument
 from parsers.base import AbstractSectionParser, Section
+from tables import mask_tables
 
 logger = logging.getLogger(__name__)
 
@@ -114,7 +115,8 @@ class FederalLawParser(AbstractSectionParser):
 
     def parse(self, raw_doc: RawDocument) -> list[Section]:
         text = raw_doc.text
-        matches = list(_ARTICLE_RE.finditer(text))
+        masked_text = mask_tables(text)
+        matches = list(_ARTICLE_RE.finditer(masked_text))
 
         if not matches:
             logger.warning(

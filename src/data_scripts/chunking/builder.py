@@ -27,7 +27,7 @@ from __future__ import annotations
 import re
 from datetime import datetime, timezone
 
-from splitter import split_text
+from splitter import prepare_text_for_chunking, split_text, split_text_table_aware
 
 # ---------------------------------------------------------------------------
 # Константы
@@ -93,7 +93,9 @@ def _process_section(
     """
     section_path: list[str] = section["path"]
     section_order: int = section["order"]
-    char_count: int = section["char_count"]
+    table_summaries = _section_table_summaries(section)
+    section_text = prepare_text_for_chunking(section["text"], table_summaries)
+    char_count: int = len(section_text)
     is_leaf: bool = section["is_leaf"]
 
     if not is_leaf:
@@ -111,7 +113,7 @@ def _process_section(
                 parent_chunk_id=structural_parent_chunk_id,
                 chunk_index=0,
                 chunk_total=1,
-                text=section["text"],
+                text=section_text,
                 doc_meta=doc_meta,
                 now=now,
                 as_of_date=as_of_date,
@@ -149,7 +151,7 @@ def _process_section(
             parent_chunk_id=structural_parent_chunk_id,
             chunk_index=0,
             chunk_total=1,
-            text=section["text"],
+            text=section_text,
             doc_meta=doc_meta,
             now=now,
             as_of_date=as_of_date,
@@ -169,14 +171,19 @@ def _process_section(
             parent_chunk_id=structural_parent_chunk_id,
             chunk_index=0,
             chunk_total=1,
-            text=section["text"],
+            text=section_text,
             doc_meta=doc_meta,
             now=now,
             as_of_date=as_of_date,
         ))
 
         # split_children: фрагменты с overlap, все индексируются
-        fragments = split_text(section["text"], CHILD_MAX_CHARS, OVERLAP_CHARS)
+        fragments = split_text_table_aware(
+            section["text"],
+            CHILD_MAX_CHARS,
+            OVERLAP_CHARS,
+            table_summaries=table_summaries,
+        )
         for i, fragment in enumerate(fragments):
             chunks.append(_make_chunk(
                 chunk_id=_chunk_id(doc_id, section_path, section_order, i),
@@ -264,4 +271,37 @@ def _make_chunk(
         "as_of_date":                 as_of_date,
         "text":                       text,
         "char_count":                 len(text),
+        "contains_table":             bool(_table_ids_for_chunk(text)),
+        "table_ids":                  _table_ids_for_chunk(text),
+        "table_summary":              _table_summary_for_chunk(text, section),
     }
+
+
+def _section_table_summaries(section: dict) -> dict[str, str]:
+    """Return table_id -> summary mapping from optional section metadata."""
+    metadata = section.get("metadata") or {}
+    tables = metadata.get("tables") or []
+    result: dict[str, str] = {}
+    for item in tables:
+        if not isinstance(item, dict):
+            continue
+        table_id = str(item.get("table_id") or "").strip()
+        summary = str(item.get("summary") or "").strip()
+        if table_id and summary:
+            result[table_id] = summary
+    return result
+
+
+def _table_ids_for_chunk(text: str) -> list[str]:
+    """Collect table ids that actually appear in the chunk text."""
+    return re.findall(r"⟦TABLE\s+id=([^\s⟧]+)⟧", text)
+
+
+def _table_summary_for_chunk(text: str, section: dict) -> str:
+    """Collect only summaries for tables that survived into this chunk."""
+    table_ids = _table_ids_for_chunk(text)
+    if not table_ids:
+        return ""
+    summaries = _section_table_summaries(section)
+    parts = [summaries[table_id] for table_id in table_ids if table_id in summaries]
+    return "\n".join(parts)
