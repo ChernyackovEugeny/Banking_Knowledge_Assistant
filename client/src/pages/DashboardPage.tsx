@@ -8,9 +8,11 @@ import {
 import {
   AnomaliesData, DocEntry, GenSession, OverviewData,
   ParseSession, PipelineData, RecentRequest, TimelinePoint,
-  TokenPoint, ValidationCheck, ArtifactsData,
+  TokenPoint, ValidationCheck, ArtifactsData, RetrieveOverviewData,
+  RetrieveRecentEntry, RetrieveTopDocEntry,
   fetchAnomalies, fetchOverview, fetchPipeline, fetchRecent,
   fetchTimeline, fetchTokens, fetchTopDocs, fetchArtifacts,
+  fetchRetrieveOverview, fetchRetrieveRecent, fetchRetrieveTopDocs,
 } from '../api/dashboard'
 
 // ──────────────────────────────────────────────────────────────────────────
@@ -783,11 +785,137 @@ function GenerationTab({ sessions, validation, artifacts }: { sessions: GenSessi
   )
 }
 
+function RetrieveTab({
+  overview,
+  recent,
+  topDocs,
+}: {
+  overview: RetrieveOverviewData | null
+  recent: RetrieveRecentEntry[]
+  topDocs: RetrieveTopDocEntry[]
+}) {
+  const errorRate = overview && overview.total_requests > 0
+    ? (overview.error_count / overview.total_requests) * 100
+    : 0
+
+  return (
+    <div className="space-y-6">
+      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
+        <StatCard
+          label="Retrieve (24ч)"
+          value={overview ? fmtInt(overview.total_requests) : '—'}
+          sub={overview ? `${fmtInt(overview.ok_count)} ok` : undefined}
+        />
+        <StatCard
+          label="Ошибки"
+          value={overview ? `${errorRate.toFixed(1)}%` : '—'}
+          sub={overview ? `${fmtInt(overview.error_count)} запросов` : undefined}
+          accent={overview && errorRate > 5 ? 'danger' : overview && errorRate === 0 ? 'ok' : 'warning'}
+        />
+        <StatCard
+          label="Avg total"
+          value={overview ? fmtMs(overview.avg_total_ms) : '—'}
+          sub="весь pipeline retrieve"
+        />
+        <StatCard
+          label="P95 total"
+          value={overview ? fmtMs(overview.p95_total_ms) : '—'}
+          sub="95-й перцентиль"
+        />
+        <StatCard
+          label="Avg semantic"
+          value={overview ? fmtMs(overview.avg_semantic_ms) : '—'}
+          sub="embed + chroma query"
+        />
+        <StatCard
+          label="BM25 fallback"
+          value={overview ? fmtInt(overview.bm25_fallback_count) : '—'}
+          sub={overview ? `avg result hits ${overview.avg_result_hits.toFixed(2)}` : undefined}
+          accent={overview && overview.bm25_fallback_count > 0 ? 'warning' : 'default'}
+        />
+      </div>
+
+      <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
+        <div className="px-4 pt-4 pb-2">
+          <SectionTitle>Последние retrieval-запросы</SectionTitle>
+        </div>
+        {recent.length === 0 ? (
+          <EmptyState msg="Пока нет retrieval-логов" />
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-xs">
+              <thead className="bg-gray-50 text-gray-500 uppercase tracking-wide">
+                <tr>
+                  <th className="px-4 py-2 text-left font-medium">Время</th>
+                  <th className="px-4 py-2 text-left font-medium">Запрос</th>
+                  <th className="px-4 py-2 text-left font-medium">Cluster</th>
+                  <th className="px-4 py-2 text-left font-medium">Статус</th>
+                  <th className="px-4 py-2 text-right font-medium">Sem/BM25</th>
+                  <th className="px-4 py-2 text-right font-medium">Fused/Result</th>
+                  <th className="px-4 py-2 text-right font-medium">Dur</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-gray-100">
+                {recent.map((r) => (
+                  <tr key={r.request_id} className={r.status === 'error' ? 'bg-red-50' : 'hover:bg-gray-50'}>
+                    <td className="px-4 py-2 text-gray-400 whitespace-nowrap font-mono">{fmtDate(r.created_at)}</td>
+                    <td className="px-4 py-2 text-gray-700 max-w-xs">
+                      <span className="line-clamp-1">{r.query_preview}</span>
+                      {r.error_msg && <span className="block text-red-500 truncate">{r.error_msg}</span>}
+                    </td>
+                    <td className="px-4 py-2 text-gray-500 font-mono">{r.cluster || 'all'}</td>
+                    <td className="px-4 py-2"><StatusBadge status={r.status} /></td>
+                    <td className="px-4 py-2 text-right text-gray-600">{r.semantic_hits}/{r.bm25_hits}</td>
+                    <td className="px-4 py-2 text-right text-gray-600">{r.fused_hits}/{r.result_hits}</td>
+                    <td className="px-4 py-2 text-right text-gray-600 whitespace-nowrap">{fmtMs(r.total_duration_ms)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+
+      {topDocs.length > 0 && (
+        <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
+          <div className="px-4 pt-4 pb-2">
+            <SectionTitle>Топ документов retrieval</SectionTitle>
+          </div>
+          <div className="overflow-x-auto">
+            <table className="w-full text-xs">
+              <thead className="bg-gray-50 text-gray-500 uppercase tracking-wide">
+                <tr>
+                  <th className="px-4 py-2 text-left font-medium">Документ</th>
+                  <th className="px-4 py-2 text-right font-medium">Появлений</th>
+                  <th className="px-4 py-2 text-right font-medium">Уник. запросов</th>
+                  <th className="px-4 py-2 text-right font-medium">Avg score</th>
+                  <th className="px-4 py-2 text-right font-medium">Avg rank</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-gray-100">
+                {topDocs.map((d) => (
+                  <tr key={d.doc_id} className="hover:bg-gray-50">
+                    <td className="px-4 py-2 font-mono text-brand-700">{d.doc_id}</td>
+                    <td className="px-4 py-2 text-right text-gray-700">{fmtInt(d.appearances)}</td>
+                    <td className="px-4 py-2 text-right text-gray-600">{fmtInt(d.unique_requests)}</td>
+                    <td className="px-4 py-2 text-right text-gray-500">{d.avg_score > 0 ? d.avg_score.toFixed(4) : '—'}</td>
+                    <td className="px-4 py-2 text-right text-gray-500">{d.avg_rank > 0 ? d.avg_rank.toFixed(1) : '—'}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
 // ──────────────────────────────────────────────────────────────────────────
 // Main DashboardPage
 // ──────────────────────────────────────────────────────────────────────────
 
-type Tab = 'chat' | 'parsing' | 'generation'
+type Tab = 'chat' | 'retrieve' | 'parsing' | 'generation'
 
 export function DashboardPage() {
   const [tab, setTab] = useState<Tab>('chat')
@@ -801,6 +929,9 @@ export function DashboardPage() {
   const [recent, setRecent]       = useState<RecentRequest[]>([])
   const [anomalies, setAnomalies] = useState<AnomaliesData | null>(null)
   const [topDocs, setTopDocs]     = useState<DocEntry[]>([])
+  const [retrieveOverview, setRetrieveOverview] = useState<RetrieveOverviewData | null>(null)
+  const [retrieveRecent, setRetrieveRecent] = useState<RetrieveRecentEntry[]>([])
+  const [retrieveTopDocs, setRetrieveTopDocs] = useState<RetrieveTopDocEntry[]>([])
   const [pipeline, setPipeline]   = useState<PipelineData | null>(null)
   const [artifacts, setArtifacts] = useState<ArtifactsData | null>(null)
 
@@ -847,6 +978,26 @@ export function DashboardPage() {
     }
   }, [])
 
+  const fetchRetrieveData = useCallback(async () => {
+    setLoading(true)
+    setError(null)
+    try {
+      const [ov, rc, td] = await Promise.all([
+        fetchRetrieveOverview(),
+        fetchRetrieveRecent(),
+        fetchRetrieveTopDocs(),
+      ])
+      setRetrieveOverview(ov)
+      setRetrieveRecent(rc)
+      setRetrieveTopDocs(td)
+      setLastUpdated(new Date())
+    } catch {
+      setError('Не удалось загрузить retrieval-метрики. Проверьте PostgreSQL и статус API.')
+    } finally {
+      setLoading(false)
+    }
+  }, [])
+
   // Initial load
   useEffect(() => { fetchChatData() }, [fetchChatData])
 
@@ -857,6 +1008,13 @@ export function DashboardPage() {
     return () => clearInterval(id)
   }, [tab, fetchChatData])
 
+  useEffect(() => {
+    if (tab !== 'retrieve') return
+    fetchRetrieveData()
+    const id = setInterval(fetchRetrieveData, 30_000)
+    return () => clearInterval(id)
+  }, [tab, fetchRetrieveData])
+
   // Lazy-load pipeline data
   useEffect(() => {
     if (tab === 'parsing' || tab === 'generation') {
@@ -866,6 +1024,7 @@ export function DashboardPage() {
 
   const tabs: { id: Tab; label: string }[] = [
     { id: 'chat',       label: 'Чат' },
+    { id: 'retrieve',   label: 'Retrieve' },
     { id: 'parsing',    label: 'Парсинг' },
     { id: 'generation', label: 'Генерация' },
   ]
@@ -890,7 +1049,12 @@ export function DashboardPage() {
             </span>
           )}
           <button
-            onClick={() => { pipelineLoadedRef.current = false; fetchChatData(); fetchPipelineData() }}
+            onClick={() => {
+              pipelineLoadedRef.current = false
+              fetchChatData()
+              fetchRetrieveData()
+              fetchPipelineData()
+            }}
             disabled={loading}
             className="text-brand-200 hover:text-white text-sm px-3 py-1 rounded border border-brand-600 hover:border-brand-400 transition-colors disabled:opacity-40"
           >
@@ -938,6 +1102,12 @@ export function DashboardPage() {
             recent={recent}
             anomalies={anomalies}
             topDocs={topDocs}
+          />
+        ) : tab === 'retrieve' ? (
+          <RetrieveTab
+            overview={retrieveOverview}
+            recent={retrieveRecent}
+            topDocs={retrieveTopDocs}
           />
         ) : tab === 'parsing' ? (
           <ParsingTab sessions={pipeline?.parse_sessions ?? []} />

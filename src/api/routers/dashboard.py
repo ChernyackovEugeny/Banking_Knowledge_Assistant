@@ -556,6 +556,157 @@ def get_top_docs(limit: int = 10) -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
+# GET /api/dashboard/retrieve/overview
+# ---------------------------------------------------------------------------
+
+@router.get("/retrieve/overview")
+def get_retrieve_overview() -> dict[str, Any]:
+    """Ключевые retrieval-метрики за последние 24 часа."""
+    defaults: dict[str, Any] = {
+        "total_requests": 0,
+        "ok_count": 0,
+        "error_count": 0,
+        "avg_total_ms": None,
+        "p95_total_ms": None,
+        "avg_semantic_ms": None,
+        "avg_bm25_ms": None,
+        "bm25_fallback_count": 0,
+        "avg_result_hits": 0.0,
+    }
+    try:
+        with _cursor() as cur:
+            cur.execute(
+                """
+                SELECT
+                    COUNT(*)                                                       AS total_requests,
+                    SUM(CASE WHEN status = 'ok' THEN 1 ELSE 0 END)               AS ok_count,
+                    SUM(CASE WHEN status = 'error' THEN 1 ELSE 0 END)            AS error_count,
+                    AVG(total_duration_ms)                                        AS avg_total_ms,
+                    PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY total_duration_ms)
+                        FILTER (WHERE status = 'ok')                              AS p95_total_ms,
+                    AVG(semantic_duration_ms)                                     AS avg_semantic_ms,
+                    AVG(bm25_duration_ms)                                         AS avg_bm25_ms,
+                    SUM(CASE WHEN bm25_fallback THEN 1 ELSE 0 END)               AS bm25_fallback_count,
+                    AVG(result_hits)                                              AS avg_result_hits
+                FROM ret_requests
+                WHERE created_at >= NOW() - INTERVAL '24 hours'
+                """
+            )
+            row = cur.fetchone() or {}
+            return {
+                "total_requests": _safe(row.get("total_requests"), int, 0),
+                "ok_count": _safe(row.get("ok_count"), int, 0),
+                "error_count": _safe(row.get("error_count"), int, 0),
+                "avg_total_ms": _safe(row.get("avg_total_ms"), float),
+                "p95_total_ms": _safe(row.get("p95_total_ms"), float),
+                "avg_semantic_ms": _safe(row.get("avg_semantic_ms"), float),
+                "avg_bm25_ms": _safe(row.get("avg_bm25_ms"), float),
+                "bm25_fallback_count": _safe(row.get("bm25_fallback_count"), int, 0),
+                "avg_result_hits": round(_safe(row.get("avg_result_hits"), float, 0.0), 2),
+            }
+    except Exception:
+        return defaults
+
+
+# ---------------------------------------------------------------------------
+# GET /api/dashboard/retrieve/recent
+# ---------------------------------------------------------------------------
+
+@router.get("/retrieve/recent")
+def get_retrieve_recent(limit: int = 20) -> list[dict]:
+    """Последние retrieval-вызовы с этапными метриками."""
+    try:
+        with _cursor() as cur:
+            cur.execute(
+                """
+                SELECT
+                    request_id,
+                    LEFT(query_text, 120)                                         AS query_preview,
+                    cluster,
+                    status,
+                    candidates,
+                    semantic_hits,
+                    bm25_hits,
+                    fused_hits,
+                    result_hits,
+                    bm25_missing_ids,
+                    bm25_fallback,
+                    semantic_duration_ms,
+                    bm25_duration_ms,
+                    total_duration_ms,
+                    created_at,
+                    error_msg
+                FROM ret_requests
+                ORDER BY created_at DESC
+                LIMIT %s
+                """,
+                (limit,),
+            )
+            return [
+                {
+                    "request_id": r["request_id"],
+                    "query_preview": r.get("query_preview") or "",
+                    "cluster": r.get("cluster"),
+                    "status": r.get("status") or "ok",
+                    "candidates": _safe(r.get("candidates"), int, 0),
+                    "semantic_hits": _safe(r.get("semantic_hits"), int, 0),
+                    "bm25_hits": _safe(r.get("bm25_hits"), int, 0),
+                    "fused_hits": _safe(r.get("fused_hits"), int, 0),
+                    "result_hits": _safe(r.get("result_hits"), int, 0),
+                    "bm25_missing_ids": _safe(r.get("bm25_missing_ids"), int, 0),
+                    "bm25_fallback": bool(r.get("bm25_fallback")),
+                    "semantic_duration_ms": _safe(r.get("semantic_duration_ms"), float),
+                    "bm25_duration_ms": _safe(r.get("bm25_duration_ms"), float),
+                    "total_duration_ms": _safe(r.get("total_duration_ms"), float),
+                    "created_at": _dt(r.get("created_at")),
+                    "error_msg": r.get("error_msg"),
+                }
+                for r in (cur.fetchall() or [])
+            ]
+    except Exception:
+        return []
+
+
+# ---------------------------------------------------------------------------
+# GET /api/dashboard/retrieve/top_docs
+# ---------------------------------------------------------------------------
+
+@router.get("/retrieve/top_docs")
+def get_retrieve_top_docs(limit: int = 10) -> list[dict]:
+    """Топ документов по попаданиям в retrieval-контекст."""
+    try:
+        with _cursor() as cur:
+            cur.execute(
+                """
+                SELECT
+                    COALESCE(doc_id, '')                                          AS doc_id,
+                    COUNT(*)                                                       AS appearances,
+                    COUNT(DISTINCT request_id)                                     AS unique_requests,
+                    COALESCE(AVG(score), 0)                                        AS avg_score,
+                    ROUND(AVG(rank)::numeric, 1)                                   AS avg_rank
+                FROM ret_chunks
+                GROUP BY COALESCE(doc_id, '')
+                ORDER BY appearances DESC
+                LIMIT %s
+                """,
+                (limit,),
+            )
+            return [
+                {
+                    "doc_id": r.get("doc_id") or "",
+                    "appearances": _safe(r.get("appearances"), int, 0),
+                    "unique_requests": _safe(r.get("unique_requests"), int, 0),
+                    "avg_score": _safe(r.get("avg_score"), float, 0.0),
+                    "avg_rank": _safe(r.get("avg_rank"), float, 0.0),
+                }
+                for r in (cur.fetchall() or [])
+                if (r.get("doc_id") or "").strip()
+            ]
+    except Exception:
+        return []
+
+
+# ---------------------------------------------------------------------------
 # GET /api/dashboard/artifacts
 # ---------------------------------------------------------------------------
 

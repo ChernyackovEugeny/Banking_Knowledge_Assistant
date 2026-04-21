@@ -116,6 +116,45 @@ export interface PipelineData {
   validation_summary: ValidationCheck[]
 }
 
+export interface RetrieveOverviewData {
+  total_requests: number
+  ok_count: number
+  error_count: number
+  avg_total_ms: number | null
+  p95_total_ms: number | null
+  avg_semantic_ms: number | null
+  avg_bm25_ms: number | null
+  bm25_fallback_count: number
+  avg_result_hits: number
+}
+
+export interface RetrieveRecentEntry {
+  request_id: string
+  query_preview: string
+  cluster: string | null
+  status: string
+  candidates: number
+  semantic_hits: number
+  bm25_hits: number
+  fused_hits: number
+  result_hits: number
+  bm25_missing_ids: number
+  bm25_fallback: boolean
+  semantic_duration_ms: number | null
+  bm25_duration_ms: number | null
+  total_duration_ms: number | null
+  created_at: string | null
+  error_msg: string | null
+}
+
+export interface RetrieveTopDocEntry {
+  doc_id: string
+  appearances: number
+  unique_requests: number
+  avg_score: number
+  avg_rank: number
+}
+
 export interface ArtifactSummary {
   files_count: number
   total_chars: number
@@ -230,3 +269,6 @@ export const fetchAnomalies  = () => get<AnomaliesData>('/chat/anomalies')
 export const fetchTopDocs    = () => get<DocEntry[]>('/chat/docs')
 export const fetchPipeline   = () => get<PipelineData>('/pipeline')
 export const fetchArtifacts  = () => get<ArtifactsData>('/artifacts')
+export const fetchRetrieveOverview = () => get<RetrieveOverviewData>('/retrieve/overview')
+export const fetchRetrieveRecent = (limit = 20) => get<RetrieveRecentEntry[]>(`/retrieve/recent?limit=${limit}`)
+export const fetchRetrieveTopDocs = (limit = 10) => get<RetrieveTopDocEntry[]>(`/retrieve/top_docs?limit=${limit}`)

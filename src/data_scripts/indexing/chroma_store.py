@@ -149,6 +149,37 @@ class ChromaStore:
         )
         return set(result["ids"])
 
+    def get_chunks_by_ids(self, chunk_ids: list[str]) -> list[dict]:
+        """Возвращает чанки по конкретным ID с текстом и метаданными.
+
+        Args:
+            chunk_ids: список chunk_id в нужном порядке.
+
+        Returns:
+            Список словарей с полями: chunk_id, text, metadata.
+            Порядок соответствует входному списку; отсутствующие ID пропускаются.
+        """
+        if not chunk_ids:
+            return []
+
+        result = self._collection.get(
+            ids=chunk_ids,
+            include=["documents", "metadatas"],
+        )
+        ids = result.get("ids", [])
+        docs = result.get("documents", [])
+        metas = result.get("metadatas", [])
+
+        by_id = {
+            ids[i]: {
+                "chunk_id": ids[i],
+                "text": docs[i],
+                "metadata": metas[i],
+            }
+            for i in range(len(ids))
+        }
+        return [by_id[cid] for cid in chunk_ids if cid in by_id]
+
     def count(self) -> int:
         """Количество векторов в коллекции."""
         return self._collection.count()

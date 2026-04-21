@@ -10,11 +10,19 @@
 from __future__ import annotations
 
 import logging
+from importlib.metadata import PackageNotFoundError, version
 import numpy as np
 
 logger = logging.getLogger(__name__)
 
 MODEL_NAME = "ai-forever/sbert_large_nlu_ru"
+
+
+def _pkg_version(name: str) -> str:
+    try:
+        return version(name)
+    except PackageNotFoundError:
+        return "not installed"
 
 
 class Embedder:
@@ -73,6 +81,14 @@ class Embedder:
             raise ImportError(
                 "sentence-transformers не установлен. "
                 "Выполни: pip install sentence-transformers"
+            ) from exc
+        except Exception as exc:  # pragma: no cover - environment-specific dependency conflict
+            raise RuntimeError(
+                "Не удалось загрузить sentence-transformers из-за конфликта зависимостей. "
+                f"Текущие версии: torch={_pkg_version('torch')}, "
+                f"transformers={_pkg_version('transformers')}, "
+                f"sentence-transformers={_pkg_version('sentence-transformers')}. "
+                "Рекомендуется закрепить совместимые версии и переустановить зависимости."
             ) from exc
 
         logger.info("Загрузка модели %s …", self._model_name)

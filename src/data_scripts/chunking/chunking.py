@@ -30,6 +30,9 @@ from pathlib import Path
 _THIS_DIR = Path(__file__).resolve().parent
 if str(_THIS_DIR) not in sys.path:
     sys.path.insert(0, str(_THIS_DIR))
+_DB_LOGGING_DIR = _THIS_DIR / "db_logging"
+if str(_DB_LOGGING_DIR) not in sys.path:
+    sys.path.insert(0, str(_DB_LOGGING_DIR))
 
 ROOT_DIR   = _THIS_DIR.parents[2]   # chunking/ → data_scripts/ → src/ → root
 CONFIG_PATH = ROOT_DIR / "public" / "config.yaml"
@@ -40,8 +43,8 @@ CHUNKS_DIR  = ROOT_DIR / "data" / "chunks"
 import yaml  # noqa: E402
 
 from builder import build_chunks  # noqa: E402
-from db_logging.log_utils import log_doc_fail, log_doc_ok, log_doc_skipped  # noqa: E402
-from db_logging.run_logger import RunLogger  # noqa: E402
+from log_utils import log_doc_fail, log_doc_ok, log_doc_skipped  # noqa: E402
+from run_logger import RunLogger  # noqa: E402
 from md_parser import parse_markdown  # noqa: E402
 
 

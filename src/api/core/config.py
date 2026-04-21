@@ -18,6 +18,11 @@ class Settings(BaseSettings):
 
     # Retrieval
     retrieval_top_k: int = 5
+    retrieval_candidates: int = 20
+    retrieval_rrf_k: int = 60
+    chroma_host: str = "localhost"
+    chroma_port: int = 8000
+    bm25_dir: str = str(_ROOT_DIR / "data" / "bm25_indexes")
 
     model_config = {
         "env_file": str(_ROOT_DIR / ".env"),

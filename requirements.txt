@@ -16,3 +16,10 @@ playwright>=1.44       # браузерная автоматизация для 
 fastapi>=0.111
 uvicorn[standard]>=0.30
 pydantic-settings>=2.3
+
+# Retrieval (src/retriever + src/data_scripts/indexing)
+chromadb>=0.5
+rank-bm25>=0.2.2
+sentence-transformers>=3.0,<5.0
+transformers>=4.41,<5.0
+pymorphy2>=0.9.1

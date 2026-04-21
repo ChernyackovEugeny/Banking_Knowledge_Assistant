@@ -14,12 +14,15 @@ from fastapi.middleware.cors import CORSMiddleware
 from src.api.routers.chat import router as chat_router
 from src.api.routers.dashboard import router as dashboard_router
 from src.api.services.chat_logger import ChatLogger
+from src.retriever.db_logging import RetrieverLogger
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     ChatLogger.initialize()
+    RetrieverLogger.initialize()
     yield
+    RetrieverLogger.shutdown()
     ChatLogger.shutdown()
 
 
