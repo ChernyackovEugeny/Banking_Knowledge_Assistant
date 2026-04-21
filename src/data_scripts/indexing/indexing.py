@@ -1,22 +1,21 @@
-"""Пайплайн индексации чанков в ChromaDB + BM25.
+"""Пайплайн индексации чанков в ChromaDB.
 
 ChromaDB работает как отдельный сервис в docker-compose (chromadb/chroma).
 Подключение по HTTP: CHROMA_HOST / CHROMA_PORT из .env.
 
 Читает data/chunks/{doc_id}_chunks.json (только is_indexed=True).
 Для каждого документа:
-  1. Эмбеддит тексты через sbert_large_nlu_ru.
+  1. Эмбеддит тексты через sentence-transformers модель.
   2. Делает upsert в ChromaDB (одна коллекция, кластер — metadata-фильтр).
   3. Обновляет state-файл data/chroma_db/index_state.json.
-После всех документов:
-  4. Перестраивает BM25-индексы для изменившихся кластеров.
+После индексации:
+  4. Помечает изменившиеся кластеры как dirty для отдельной сборки BM25.
 
 Стратегия пропуска:
-  - Без --force: документы из index_state.json пропускаются (только embed).
-    BM25 перестраивается только для кластеров, в которых есть новые документы.
+  - Без --force: документы из index_state.json пропускаются.
   - С --force: всё переиндексируется с нуля.
-  - --skip-embeddings: пропустить шаги 1-3, только перестроить BM25.
-  - --skip-bm25: пропустить шаг 4, только ChromaDB.
+  - BM25 больше не строится автоматически в этом скрипте.
+    Для BM25 используйте отдельный bm25_rebuild.py.
 
 CLI:
   python indexing.py                          # только новые документы
@@ -24,8 +23,7 @@ CLI:
   python indexing.py --only 115-FZ 590-P      # конкретные doc_id
   python indexing.py --cluster compliance     # только один кластер
   python indexing.py --source real            # только реальные НПА
-  python indexing.py --skip-embeddings        # только BM25
-  python indexing.py --skip-bm25             # только ChromaDB
+  python indexing.py --batch-size 4          # размер батча эмбеддинга
   python indexing.py --log-level DEBUG
 """
 from __future__ import annotations
@@ -37,6 +35,7 @@ import os
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
+from time import perf_counter
 
 import yaml
 
@@ -54,12 +53,13 @@ CHUNKS_DIR   = ROOT_DIR / "data" / "chunks"
 # Векторы живут в контейнере chroma (docker-compose). Локально держим только
 # bookkeeping-файл индексатора, чтобы знать какие doc_id уже загружены.
 STATE_DIR    = ROOT_DIR / "data" / "chroma_db"
-BM25_DIR     = ROOT_DIR / "data" / "bm25_indexes"
 STATE_PATH   = STATE_DIR / "index_state.json"
+BM25_DIR     = ROOT_DIR / "data" / "bm25_indexes"
+BM25_STATE_PATH = BM25_DIR / "rebuild_state.json"
+DEFAULT_DOC_BATCH_SIZE = 64
 
-from chroma_store import ChromaStore, chunk_to_metadata  # noqa: E402
-from bm25_store import BM25Store                          # noqa: E402
-from embedder import Embedder                             # noqa: E402
+from stores.chroma_store import ChromaStore, chunk_to_metadata  # noqa: E402
+from embedding.embedder import Embedder                          # noqa: E402
 from db_logging.log_utils import (                        # noqa: E402
     log_doc_ok, log_doc_fail, log_doc_skipped,
 )
@@ -109,6 +109,46 @@ def save_state(state: dict) -> None:
     )
 
 
+def load_bm25_state() -> dict:
+    """Загружает состояние rebuild BM25."""
+    if BM25_STATE_PATH.exists():
+        try:
+            data = json.loads(BM25_STATE_PATH.read_text(encoding="utf-8"))
+        except Exception:
+            logging.warning("Не удалось прочитать rebuild_state.json — сброс")
+            return {"dirty_clusters": []}
+        dirty_clusters = data.get("dirty_clusters", [])
+        if not isinstance(dirty_clusters, list):
+            return {"dirty_clusters": []}
+        return {"dirty_clusters": sorted({str(cluster) for cluster in dirty_clusters if cluster})}
+    return {"dirty_clusters": []}
+
+
+def save_bm25_state(state: dict) -> None:
+    """Сохраняет состояние rebuild BM25."""
+    BM25_DIR.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "dirty_clusters": sorted({str(cluster) for cluster in state.get("dirty_clusters", []) if cluster}),
+    }
+    BM25_STATE_PATH.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+
+def mark_bm25_clusters_dirty(clusters: set[str]) -> set[str]:
+    """Помечает кластеры грязными для последующей сборки BM25."""
+    clean_clusters = {cluster for cluster in clusters if cluster}
+    if not clean_clusters:
+        return set()
+
+    state = load_bm25_state()
+    dirty = set(state.get("dirty_clusters", []))
+    dirty.update(clean_clusters)
+    save_bm25_state({"dirty_clusters": sorted(dirty)})
+    return clean_clusters
+
+
 # ---------------------------------------------------------------------------
 # Загрузка чанков
 # ---------------------------------------------------------------------------
@@ -141,6 +181,13 @@ def load_all_chunks_by_cluster(doc_ids_to_include: list[str]) -> dict[str, list[
     return by_cluster
 
 
+def iter_chunk_batches(chunks: list[dict], batch_size: int):
+    """Итерирует чанки документа небольшими порциями."""
+    for start in range(0, len(chunks), batch_size):
+        end = start + batch_size
+        yield start, end, chunks[start:end]
+
+
 # ---------------------------------------------------------------------------
 # Индексация одного документа (embed + ChromaDB upsert)
 # ---------------------------------------------------------------------------
@@ -151,6 +198,8 @@ def index_document(
     *,
     embedder: Embedder,
     chroma: ChromaStore,
+    batch_size: int,
+    doc_batch_size: int,
     force: bool,
     state: dict,
     run_log: RunLogger | None,
@@ -187,14 +236,37 @@ def index_document(
         return "skipped"
 
     try:
-        texts      = [c["text"] for c in chunks]
-        chunk_ids  = [c["chunk_id"] for c in chunks]
-        metadatas  = [chunk_to_metadata(c) for c in chunks]
-
-        logging.info("  %s: эмбеддинг %d чанков …", doc_id, len(chunks))
-        embeddings = embedder.encode(texts, show_progress=False)
-
-        chroma.upsert(chunk_ids, embeddings, texts, metadatas)
+        doc_t0 = perf_counter()
+        embed_total_s = 0.0
+        upsert_total_s = 0.0
+        logging.info(
+            "  %s: эмбеддинг %d чанков батчами по %d …",
+            doc_id, len(chunks), doc_batch_size,
+        )
+        for start, end, chunk_batch in iter_chunk_batches(chunks, doc_batch_size):
+            texts = [c["text"] for c in chunk_batch]
+            chunk_ids = [c["chunk_id"] for c in chunk_batch]
+            metadatas = [chunk_to_metadata(c) for c in chunk_batch]
+            batch_t0 = perf_counter()
+            embed_t0 = perf_counter()
+            embeddings = embedder.encode(texts, batch_size=batch_size, show_progress=False)
+            embed_s = perf_counter() - embed_t0
+            upsert_t0 = perf_counter()
+            chroma.upsert(chunk_ids, embeddings, texts, metadatas)
+            upsert_s = perf_counter() - upsert_t0
+            batch_s = perf_counter() - batch_t0
+            embed_total_s += embed_s
+            upsert_total_s += upsert_s
+            logging.info(
+                "  %s: батч %d-%d/%d | embed %.2fs | upsert %.2fs | total %.2fs",
+                doc_id,
+                start + 1,
+                min(end, len(chunks)),
+                len(chunks),
+                embed_s,
+                upsert_s,
+                batch_s,
+            )
 
         state[doc_id] = {
             "indexed_at":  datetime.now(timezone.utc).isoformat(),
@@ -203,7 +275,16 @@ def index_document(
             "source_type": source_type,
         }
 
-        logging.info("  %s → %d чанков в ChromaDB (кластер: %s)", doc_id, len(chunks), cluster)
+        doc_total_s = perf_counter() - doc_t0
+        logging.info(
+            "  %s → %d чанков в ChromaDB (кластер: %s) | embed %.2fs | upsert %.2fs | total %.2fs",
+            doc_id,
+            len(chunks),
+            cluster,
+            embed_total_s,
+            upsert_total_s,
+            doc_total_s,
+        )
         log_doc_ok(run_log, doc_id, cluster, source_type, len(chunks))
         return "ok"
 
@@ -214,42 +295,12 @@ def index_document(
 
 
 # ---------------------------------------------------------------------------
-# Построение BM25
-# ---------------------------------------------------------------------------
-
-def rebuild_bm25(
-    clusters_to_rebuild: set[str],
-    all_doc_ids: list[str],
-    bm25: BM25Store,
-) -> None:
-    """Перестраивает BM25-индексы для указанных кластеров.
-
-    Загружает ВСЕ доступные чанки (из data/chunks/) для каждого кластера.
-    """
-    if not clusters_to_rebuild:
-        return
-
-    logging.info("BM25: перестройка кластеров: %s", sorted(clusters_to_rebuild))
-    by_cluster = load_all_chunks_by_cluster(all_doc_ids)
-
-    for cluster in sorted(clusters_to_rebuild):
-        chunks = by_cluster.get(cluster, [])
-        if not chunks:
-            logging.warning("BM25: кластер '%s' — нет чанков, пропуск", cluster)
-            continue
-        try:
-            bm25.build(cluster, chunks)
-        except Exception as exc:
-            logging.error("BM25: ошибка при построении '%s': %s", cluster, exc, exc_info=True)
-
-
-# ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
-        description="Индексация чанков в ChromaDB + BM25",
+        description="Индексация чанков в ChromaDB",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Примеры:
@@ -258,8 +309,8 @@ def parse_args() -> argparse.Namespace:
   python indexing.py --only 115-FZ 590-P      # конкретные doc_id
   python indexing.py --cluster compliance     # только один кластер
   python indexing.py --source real            # только реальные НПА
-  python indexing.py --skip-embeddings        # только BM25 (без ChromaDB)
-  python indexing.py --skip-bm25             # только ChromaDB (без BM25)
+  python indexing.py --batch-size 6          # размер батча эмбеддинга
+  python indexing.py --doc-batch-size 64     # размер батча чанков для upsert
         """,
     )
     p.add_argument("--force",  action="store_true",
@@ -270,10 +321,10 @@ def parse_args() -> argparse.Namespace:
                    help="Индексировать только документы одного кластера")
     p.add_argument("--source", choices=["real", "synthetic", "all"], default="all",
                    help="Тип документов (по умолчанию: all)")
-    p.add_argument("--skip-embeddings", action="store_true", dest="skip_embeddings",
-                   help="Не выполнять embed + upsert в ChromaDB, только BM25")
-    p.add_argument("--skip-bm25", action="store_true", dest="skip_bm25",
-                   help="Не перестраивать BM25, только ChromaDB")
+    p.add_argument("--batch-size", type=int, default=6, dest="batch_size",
+                   help="Размер батча для sentence-transformers (по умолчанию: 6)")
+    p.add_argument("--doc-batch-size", type=int, default=DEFAULT_DOC_BATCH_SIZE, dest="doc_batch_size",
+                   help="Размер батча чанков для embed + upsert (по умолчанию: 64)")
     p.add_argument("--log-level", default="INFO",
                    choices=["DEBUG", "INFO", "WARNING", "ERROR"],
                    dest="log_level",
@@ -287,6 +338,12 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+    if args.batch_size < 1:
+        logging.error("--batch-size должен быть >= 1")
+        sys.exit(1)
+    if args.doc_batch_size < 1:
+        logging.error("--doc-batch-size должен быть >= 1")
+        sys.exit(1)
     logging.basicConfig(
         level=getattr(logging, args.log_level),
         format="%(asctime)s [%(levelname)s] %(message)s",
@@ -315,16 +372,10 @@ def main() -> None:
 
     state = load_state()
 
-    # Инициализация хранилищ
-    if args.skip_embeddings:
-        chroma = None
-        embedder = None
-    else:
-        chroma_host = os.getenv("CHROMA_HOST", "localhost")
-        chroma_port = int(os.getenv("CHROMA_PORT", "8000"))
-        chroma   = ChromaStore(chroma_host, chroma_port)
-        embedder = Embedder()
-    bm25 = None if args.skip_bm25 else BM25Store(BM25_DIR)
+    chroma_host = os.getenv("CHROMA_HOST", "localhost")
+    chroma_port = int(os.getenv("CHROMA_PORT", "8000"))
+    chroma   = ChromaStore(chroma_host, chroma_port)
+    embedder = Embedder(batch_size=args.batch_size)
 
     total = len(filtered)
     ok = skipped = failed = 0
@@ -336,57 +387,44 @@ def main() -> None:
         # -----------------------------------------------------------
         # Шаг 1-3: embed + upsert в ChromaDB
         # -----------------------------------------------------------
-        if not args.skip_embeddings:
-            logging.info("=== ChromaDB: индексация %d документов ===", total)
-            for i, doc_meta in enumerate(filtered, 1):
-                doc_id = doc_meta["id"]
-                logging.info("[%d/%d] %s", i, total, doc_id)
+        logging.info("=== ChromaDB: индексация %d документов ===", total)
+        for i, doc_meta in enumerate(filtered, 1):
+            doc_id = doc_meta["id"]
+            logging.info("[%d/%d] %s", i, total, doc_id)
 
-                status = index_document(
-                    doc_id, doc_meta,
-                    embedder=embedder,
-                    chroma=chroma,
-                    force=args.force,
-                    state=state,
-                    run_log=run_log,
-                )
-                if status == "ok":
-                    ok += 1
-                    chunks_total += state[doc_id]["chunk_count"]
-                    newly_indexed_clusters.add(doc_meta.get("cluster", ""))
-                elif status == "skipped":
-                    skipped += 1
-                else:
-                    failed += 1
+            status = index_document(
+                doc_id, doc_meta,
+                embedder=embedder,
+                chroma=chroma,
+                batch_size=args.batch_size,
+                doc_batch_size=args.doc_batch_size,
+                force=args.force,
+                state=state,
+                run_log=run_log,
+            )
+            if status == "ok":
+                ok += 1
+                chunks_total += state[doc_id]["chunk_count"]
+                newly_indexed_clusters.add(doc_meta.get("cluster", ""))
+            elif status == "skipped":
+                skipped += 1
+            else:
+                failed += 1
 
-            save_state(state)
+        save_state(state)
+
+        dirty_clusters = mark_bm25_clusters_dirty(newly_indexed_clusters)
+        logging.info(
+            "ChromaDB: %d проиндексировано, %d пропущено, %d ошибок | итого %d векторов",
+            ok, skipped, failed, chroma.count(),
+        )
+        if dirty_clusters:
             logging.info(
-                "ChromaDB: %d проиндексировано, %d пропущено, %d ошибок | итого %d векторов",
-                ok, skipped, failed, chroma.count(),
+                "BM25: помечены dirty-кластеры %s. Запустите bm25_rebuild.py --dirty-only",
+                sorted(dirty_clusters),
             )
         else:
-            logging.info("--skip-embeddings: шаг ChromaDB пропущен")
-            # Считаем все doc_id в filtered как "новые" для BM25
-            for doc_meta in filtered:
-                newly_indexed_clusters.add(doc_meta.get("cluster", ""))
-
-        # -----------------------------------------------------------
-        # Шаг 4: BM25
-        # -----------------------------------------------------------
-        if not args.skip_bm25:
-            # Если --force → перестраиваем все кластеры из filtered
-            if args.force:
-                clusters_to_rebuild = {d.get("cluster", "") for d in filtered}
-            else:
-                clusters_to_rebuild = newly_indexed_clusters
-
-            if clusters_to_rebuild:
-                all_indexed_doc_ids = list(state.keys())
-                rebuild_bm25(clusters_to_rebuild, all_indexed_doc_ids, bm25)
-            else:
-                logging.info("BM25: новых документов нет, перестройка не требуется")
-        else:
-            logging.info("--skip-bm25: шаг BM25 пропущен")
+            logging.info("BM25: dirty-кластеры не изменились")
 
         run_log.finalize(
             docs_total=total,

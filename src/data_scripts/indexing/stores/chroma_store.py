@@ -90,13 +90,12 @@ class ChromaStore:
             metadatas:  список словарей с метаданными (sanitize применяется внутри)
         """
         clean_meta = [_sanitize_metadata(m) for m in metadatas]
-        emb_list = embeddings.tolist()
 
         for start in range(0, len(chunk_ids), _CHROMA_BATCH):
             end = start + _CHROMA_BATCH
             self._collection.upsert(
                 ids=chunk_ids[start:end],
-                embeddings=emb_list[start:end],
+                embeddings=embeddings[start:end].tolist(),
                 documents=texts[start:end],
                 metadatas=clean_meta[start:end],
             )

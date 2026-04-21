@@ -8,10 +8,10 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from src.api.core.config import get_settings
-from src.data_scripts.indexing.bm25_store import BM25Store
-from src.data_scripts.indexing.chroma_store import ChromaStore
-from src.data_scripts.indexing.embedder import Embedder
-from src.data_scripts.indexing.hybrid import reciprocal_rank_fusion
+from src.data_scripts.indexing.stores.bm25_store import BM25Store
+from src.data_scripts.indexing.stores.chroma_store import ChromaStore
+from src.data_scripts.indexing.embedding.embedder import Embedder
+from src.data_scripts.indexing.retrieval.hybrid import reciprocal_rank_fusion
 from src.retriever.db_logging import RetrieverLogger
 
 logger = logging.getLogger(__name__)
@@ -97,7 +97,7 @@ async def retrieve(
         embedding = await asyncio.to_thread(
             runtime.embedder.encode,
             [clean_query],
-            32,
+            None,
             False,
         )
         query_vector = embedding[0].tolist()

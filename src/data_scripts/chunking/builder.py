@@ -37,6 +37,15 @@ CHILD_MAX_CHARS  = 800    # ~200 токенов для sbert_large_nlu_ru (max_s
 OVERLAP_CHARS    = 120    # ~15% от CHILD_MAX — достаточно для boundary coverage
 PARENT_MAX_CHARS = 3500   # ~900 токенов — комфортный контекст для LLM
 
+# Пер-документные профили для тяжелых документов (крупные табличные формы).
+DOC_CHUNKING_OVERRIDES: dict[str, dict[str, int]] = {
+    "6406-U": {
+        "child_max_chars": 1600,
+        "overlap_chars": 80,
+        "parent_max_chars": PARENT_MAX_CHARS,
+    },
+}
+
 
 # ---------------------------------------------------------------------------
 # Публичный API
@@ -58,6 +67,7 @@ def build_chunks(tree: dict, doc_meta: dict) -> list[dict]:
     doc_id: str = tree["doc_id"]
     now: str = datetime.now(timezone.utc).isoformat()
     as_of_date: str = _get_as_of_date(doc_meta)
+    child_max_chars, overlap_chars, parent_max_chars = _chunking_params(doc_id)
 
     chunks: list[dict] = []
     for section in tree["sections"]:
@@ -69,6 +79,9 @@ def build_chunks(tree: dict, doc_meta: dict) -> list[dict]:
             as_of_date=as_of_date,
             chunks=chunks,
             structural_parent_chunk_id=None,
+            child_max_chars=child_max_chars,
+            overlap_chars=overlap_chars,
+            parent_max_chars=parent_max_chars,
         )
     return chunks
 
@@ -85,6 +98,9 @@ def _process_section(
     as_of_date: str,
     chunks: list[dict],
     structural_parent_chunk_id: str | None,
+    child_max_chars: int,
+    overlap_chars: int,
+    parent_max_chars: int,
 ) -> None:
     """DFS-обход дерева секций с построением чанков.
 
@@ -102,7 +118,7 @@ def _process_section(
         # Нелистовая секция (например, глава ЦБ-документа с пунктами).
         # Создаём structural split_parent — полный текст главы как контекст для детей.
         # Только если текст влезает в PARENT_MAX (иначе он всё равно не пригодится LLM).
-        if char_count <= PARENT_MAX_CHARS:
+        if char_count <= parent_max_chars:
             sp_id = _chunk_id(doc_id, section_path, section_order, "parent")
             chunks.append(_make_chunk(
                 chunk_id=sp_id,
@@ -132,12 +148,15 @@ def _process_section(
                 as_of_date=as_of_date,
                 chunks=chunks,
                 structural_parent_chunk_id=children_context_id,
+                child_max_chars=child_max_chars,
+                overlap_chars=overlap_chars,
+                parent_max_chars=parent_max_chars,
             )
         return
 
     # ----- Листовая секция -----
 
-    if char_count <= CHILD_MAX_CHARS:
+    if char_count <= child_max_chars:
         # Маленькая: один leaf чанк.
         # parent_chunk_id → структурный родитель (глава), если есть.
         # При retrieval: если parent_chunk_id задан → LLM получает текст главы,
@@ -180,8 +199,8 @@ def _process_section(
         # split_children: фрагменты с overlap, все индексируются
         fragments = split_text_table_aware(
             section["text"],
-            CHILD_MAX_CHARS,
-            OVERLAP_CHARS,
+            child_max_chars,
+            overlap_chars,
             table_summaries=table_summaries,
         )
         for i, fragment in enumerate(fragments):
@@ -199,6 +218,18 @@ def _process_section(
                 now=now,
                 as_of_date=as_of_date,
             ))
+
+
+def _chunking_params(doc_id: str) -> tuple[int, int, int]:
+    """Возвращает профиль чанкинга (child_max, overlap, parent_max) для документа."""
+    override = DOC_CHUNKING_OVERRIDES.get(doc_id)
+    if not override:
+        return CHILD_MAX_CHARS, OVERLAP_CHARS, PARENT_MAX_CHARS
+    return (
+        int(override.get("child_max_chars", CHILD_MAX_CHARS)),
+        int(override.get("overlap_chars", OVERLAP_CHARS)),
+        int(override.get("parent_max_chars", PARENT_MAX_CHARS)),
+    )
 
 
 # ---------------------------------------------------------------------------

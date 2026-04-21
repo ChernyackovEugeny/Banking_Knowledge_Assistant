@@ -1,8 +1,6 @@
 """Обёртка над sentence-transformers для получения эмбеддингов.
 
-Модель: ai-forever/sbert_large_nlu_ru
-  max_seq_length = 512 токенов
-  hidden_size    = 1024
+Модель по умолчанию: sergeyzh/BERTA
   normalize_embeddings=True → косинусное расстояние = dot product
 
 Загружается лениво при первом вызове encode().
@@ -15,7 +13,8 @@ import numpy as np
 
 logger = logging.getLogger(__name__)
 
-MODEL_NAME = "ai-forever/sbert_large_nlu_ru"
+MODEL_NAME = "sergeyzh/BERTA"
+DEFAULT_BATCH_SIZE = 6
 
 
 def _pkg_version(name: str) -> str:
@@ -28,8 +27,15 @@ def _pkg_version(name: str) -> str:
 class Embedder:
     """Ленивая загрузка модели + батчевое кодирование."""
 
-    def __init__(self, model_name: str = MODEL_NAME) -> None:
+    def __init__(
+        self,
+        model_name: str = MODEL_NAME,
+        batch_size: int = DEFAULT_BATCH_SIZE,
+    ) -> None:
+        if batch_size < 1:
+            raise ValueError("batch_size must be >= 1")
         self._model_name = model_name
+        self._batch_size = batch_size
         self._model = None
 
     # ------------------------------------------------------------------
@@ -39,7 +45,7 @@ class Embedder:
     def encode(
         self,
         texts: list[str],
-        batch_size: int = 32,
+        batch_size: int | None = None,
         show_progress: bool = True,
     ) -> np.ndarray:
         """Кодирует список текстов в L2-нормализованные эмбеддинги.
@@ -53,10 +59,11 @@ class Embedder:
             np.ndarray shape (len(texts), hidden_size), dtype float32
         """
         self._ensure_loaded()
-        logger.debug("Embedding %d texts (batch_size=%d)", len(texts), batch_size)
+        effective_batch_size = batch_size or self._batch_size
+        logger.debug("Embedding %d texts (batch_size=%d)", len(texts), effective_batch_size)
         embeddings = self._model.encode(
             texts,
-            batch_size=batch_size,
+            batch_size=effective_batch_size,
             show_progress_bar=show_progress,
             normalize_embeddings=True,
             convert_to_numpy=True,
