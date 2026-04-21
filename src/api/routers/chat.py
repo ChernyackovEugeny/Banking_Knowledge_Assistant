@@ -22,14 +22,21 @@ router = APIRouter(prefix="/api")
 async def chat(request: ChatRequest) -> StreamingResponse:
     settings  = get_settings()
     history   = get_history(request.session_id)
-    chunks    = await retrieve(request.message, top_k=settings.retrieval_top_k)
-
     request_id = ChatLogger.new_request_id()
+    chunks    = await retrieve(
+        request.message,
+        top_k=settings.retrieval_top_k,
+        parent_chat_request_id=request_id,
+    )
+
     await ChatLogger.log_request_start(
         request_id,
         request.session_id,
         request.message,
         len(history),
+        settings.observability_config_version,
+        settings.observability_prompt_version,
+        settings.observability_retrieval_version,
     )
 
     t_start = time.monotonic()

@@ -53,6 +53,9 @@ CREATE TABLE IF NOT EXISTS chat_requests (
     request_id         TEXT PRIMARY KEY,
     session_id         TEXT NOT NULL REFERENCES chat_sessions(session_id),
     query_text         TEXT NOT NULL,
+    config_version     TEXT NOT NULL DEFAULT 'v1',
+    prompt_version     TEXT NOT NULL DEFAULT 'v1',
+    retrieval_version  TEXT NOT NULL DEFAULT 'hybrid_rrf_v1',
     response_text      TEXT,
     response_chars     INTEGER,
     retrieved_chunks_n INTEGER,
@@ -63,6 +66,13 @@ CREATE TABLE IF NOT EXISTS chat_requests (
     completed_at       TIMESTAMPTZ,
     total_duration_ms  DOUBLE PRECISION
 );
+
+ALTER TABLE chat_requests
+    ADD COLUMN IF NOT EXISTS config_version TEXT NOT NULL DEFAULT 'v1';
+ALTER TABLE chat_requests
+    ADD COLUMN IF NOT EXISTS prompt_version TEXT NOT NULL DEFAULT 'v1';
+ALTER TABLE chat_requests
+    ADD COLUMN IF NOT EXISTS retrieval_version TEXT NOT NULL DEFAULT 'hybrid_rrf_v1';
 
 CREATE INDEX IF NOT EXISTS idx_chat_req_session
     ON chat_requests (session_id, requested_at DESC);
@@ -200,6 +210,9 @@ class ChatLogger:
         session_id: str,
         query: str,
         history_len: int,
+        config_version: str,
+        prompt_version: str,
+        retrieval_version: str,
     ) -> None:
         """Р¤РёРєСЃРёСЂСѓРµС‚ РЅР°С‡Р°Р»Рѕ Р·Р°РїСЂРѕСЃР° (status='in_progress').
 
@@ -212,7 +225,13 @@ class ChatLogger:
         await loop.run_in_executor(
             None,
             cls._sync_request_start,
-            request_id, session_id, query, history_len,
+            request_id,
+            session_id,
+            query,
+            history_len,
+            config_version,
+            prompt_version,
+            retrieval_version,
         )
 
     @classmethod
@@ -258,6 +277,9 @@ class ChatLogger:
         session_id: str,
         query: str,
         history_len: int,
+        config_version: str,
+        prompt_version: str,
+        retrieval_version: str,
     ) -> None:
         conn = cls._pool.getconn()
         try:
@@ -278,11 +300,22 @@ class ChatLogger:
                 cur.execute(
                     """
                     INSERT INTO chat_requests
-                        (request_id, session_id, query_text, history_len,
+                        (request_id, session_id, query_text,
+                         config_version, prompt_version, retrieval_version,
+                         history_len,
                          status, requested_at)
-                    VALUES (%s, %s, %s, %s, 'in_progress', %s)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, 'in_progress', %s)
                     """,
-                    (request_id, session_id, query, history_len, now),
+                    (
+                        request_id,
+                        session_id,
+                        query,
+                        config_version,
+                        prompt_version,
+                        retrieval_version,
+                        history_len,
+                        now,
+                    ),
                 )
         except Exception as exc:
             logger.debug("ChatLogger._sync_request_start: %s", exc)

@@ -24,6 +24,11 @@ class Settings(BaseSettings):
     chroma_port: int = 8000
     bm25_dir: str = str(_ROOT_DIR / "data" / "bm25_indexes")
 
+    # Observability versions (for metric comparability across runs)
+    observability_config_version: str = "v1"
+    observability_prompt_version: str = "v1"
+    observability_retrieval_version: str = "hybrid_rrf_v1"
+
     model_config = {
         "env_file": str(_ROOT_DIR / ".env"),
         "env_ignore_empty": True,

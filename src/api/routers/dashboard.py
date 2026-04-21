@@ -36,6 +36,8 @@ PARSED_DIR = ROOT_DIR / "data" / "parsed"
 GENERATED_DIR = ROOT_DIR / "data" / "generated"
 QUESTIONS_DIR = ROOT_DIR / "data" / "questions"
 CHUNKS_DIR = ROOT_DIR / "data" / "chunks"
+EVAL_DIR = ROOT_DIR / "data" / "eval"
+RETRIEVAL_EVAL_REPORT = EVAL_DIR / "retrieval_eval_report.json"
 _TOKEN_RE = re.compile(r"\S+", flags=re.UNICODE)
 
 
@@ -556,6 +558,278 @@ def get_top_docs(limit: int = 10) -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
+# GET /api/dashboard/llm/overview
+# ---------------------------------------------------------------------------
+
+@router.get("/llm/overview")
+def get_llm_overview() -> dict[str, Any]:
+    """Ключевые LLM-метрики за последние 24 часа."""
+    defaults: dict[str, Any] = {
+        "total_calls": 0,
+        "ok_count": 0,
+        "error_count": 0,
+        "p50_duration_ms": None,
+        "avg_duration_ms": None,
+        "p95_duration_ms": None,
+        "total_tokens_24h": 0,
+        "prompt_tokens_24h": 0,
+        "completion_tokens_24h": 0,
+        "avg_tokens_per_call": 0.0,
+    }
+    try:
+        with _cursor() as cur:
+            cur.execute(
+                """
+                SELECT
+                    COUNT(*)                                                       AS total_calls,
+                    SUM(CASE WHEN status = 'ok' THEN 1 ELSE 0 END)               AS ok_count,
+                    SUM(CASE WHEN status = 'error' THEN 1 ELSE 0 END)            AS error_count,
+                    PERCENTILE_CONT(0.50) WITHIN GROUP (ORDER BY duration_ms)
+                        FILTER (WHERE status = 'ok')                              AS p50_duration_ms,
+                    AVG(CASE WHEN status = 'ok' THEN duration_ms END)             AS avg_duration_ms,
+                    PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY duration_ms)
+                        FILTER (WHERE status = 'ok')                              AS p95_duration_ms,
+                    COALESCE(SUM(total_tokens), 0)                                AS total_tokens_24h,
+                    COALESCE(SUM(prompt_tokens), 0)                               AS prompt_tokens_24h,
+                    COALESCE(SUM(completion_tokens), 0)                           AS completion_tokens_24h,
+                    AVG(CASE WHEN status = 'ok' THEN total_tokens END)            AS avg_tokens_per_call
+                FROM chat_llm_calls
+                WHERE called_at >= NOW() - INTERVAL '24 hours'
+                """
+            )
+            row = cur.fetchone() or {}
+            return {
+                "total_calls": _safe(row.get("total_calls"), int, 0),
+                "ok_count": _safe(row.get("ok_count"), int, 0),
+                "error_count": _safe(row.get("error_count"), int, 0),
+                "p50_duration_ms": _safe(row.get("p50_duration_ms"), float),
+                "avg_duration_ms": _safe(row.get("avg_duration_ms"), float),
+                "p95_duration_ms": _safe(row.get("p95_duration_ms"), float),
+                "total_tokens_24h": _safe(row.get("total_tokens_24h"), int, 0),
+                "prompt_tokens_24h": _safe(row.get("prompt_tokens_24h"), int, 0),
+                "completion_tokens_24h": _safe(row.get("completion_tokens_24h"), int, 0),
+                "avg_tokens_per_call": round(_safe(row.get("avg_tokens_per_call"), float, 0.0), 2),
+            }
+    except Exception:
+        return defaults
+
+
+# ---------------------------------------------------------------------------
+# GET /api/dashboard/llm/timeline
+# ---------------------------------------------------------------------------
+
+@router.get("/llm/timeline")
+def get_llm_timeline(hours: int = 24) -> list[dict]:
+    """LLM-вызовы по часам за последние N часов."""
+    try:
+        with _cursor() as cur:
+            cur.execute(
+                """
+                SELECT
+                    DATE_TRUNC('hour', called_at)                                 AS hour,
+                    COUNT(*)                                                       AS total,
+                    SUM(CASE WHEN status = 'error' THEN 1 ELSE 0 END)            AS errors
+                FROM chat_llm_calls
+                WHERE called_at >= NOW() - INTERVAL '1 hour' * %s
+                GROUP BY 1
+                ORDER BY 1
+                """,
+                (hours,),
+            )
+            return [
+                {
+                    "hour": r["hour"].strftime("%H:%M") if r.get("hour") else "",
+                    "total": _safe(r.get("total"), int, 0),
+                    "errors": _safe(r.get("errors"), int, 0),
+                }
+                for r in (cur.fetchall() or [])
+            ]
+    except Exception:
+        return []
+
+
+# ---------------------------------------------------------------------------
+# GET /api/dashboard/llm/tokens
+# ---------------------------------------------------------------------------
+
+@router.get("/llm/tokens")
+def get_llm_tokens(days: int = 14) -> list[dict]:
+    """Расход токенов LLM по дням за последние N дней."""
+    try:
+        with _cursor() as cur:
+            cur.execute(
+                """
+                SELECT
+                    DATE_TRUNC('day', called_at)::date                            AS day,
+                    COALESCE(SUM(total_tokens), 0)                                AS total_tokens,
+                    COALESCE(SUM(prompt_tokens), 0)                               AS prompt_tokens,
+                    COALESCE(SUM(completion_tokens), 0)                           AS completion_tokens,
+                    COUNT(*)                                                       AS calls
+                FROM chat_llm_calls
+                WHERE called_at >= NOW() - INTERVAL '1 day' * %s
+                GROUP BY 1
+                ORDER BY 1
+                """,
+                (days,),
+            )
+            return [
+                {
+                    "day": r["day"].isoformat() if r.get("day") else "",
+                    "total_tokens": _safe(r.get("total_tokens"), int, 0),
+                    "prompt_tokens": _safe(r.get("prompt_tokens"), int, 0),
+                    "completion_tokens": _safe(r.get("completion_tokens"), int, 0),
+                    "calls": _safe(r.get("calls"), int, 0),
+                }
+                for r in (cur.fetchall() or [])
+            ]
+    except Exception:
+        return []
+
+
+# ---------------------------------------------------------------------------
+# GET /api/dashboard/llm/recent
+# ---------------------------------------------------------------------------
+
+@router.get("/llm/recent")
+def get_llm_recent(limit: int = 20) -> list[dict]:
+    """Последние LLM-вызовы с превью запроса и токенами."""
+    try:
+        with _cursor() as cur:
+            cur.execute(
+                """
+                SELECT
+                    l.call_id,
+                    l.request_id,
+                    LEFT(r.query_text, 120)                                        AS query_preview,
+                    LEFT(r.session_id, 8)                                          AS session_short,
+                    l.model,
+                    l.status,
+                    l.duration_ms,
+                    l.prompt_tokens,
+                    l.completion_tokens,
+                    l.total_tokens,
+                    l.called_at,
+                    l.error_msg
+                FROM chat_llm_calls l
+                LEFT JOIN chat_requests r ON r.request_id = l.request_id
+                ORDER BY l.called_at DESC
+                LIMIT %s
+                """,
+                (limit,),
+            )
+            return [
+                {
+                    "call_id": r.get("call_id"),
+                    "request_id": r.get("request_id"),
+                    "query_preview": r.get("query_preview") or "",
+                    "session_short": r.get("session_short") or "",
+                    "model": r.get("model") or "",
+                    "status": r.get("status") or "ok",
+                    "duration_ms": _safe(r.get("duration_ms"), float),
+                    "prompt_tokens": _safe(r.get("prompt_tokens"), int),
+                    "completion_tokens": _safe(r.get("completion_tokens"), int),
+                    "total_tokens": _safe(r.get("total_tokens"), int),
+                    "called_at": _dt(r.get("called_at")),
+                    "error_msg": r.get("error_msg"),
+                }
+                for r in (cur.fetchall() or [])
+            ]
+    except Exception:
+        return []
+
+
+# ---------------------------------------------------------------------------
+# GET /api/dashboard/llm/models
+# ---------------------------------------------------------------------------
+
+@router.get("/llm/models")
+def get_llm_models(days: int = 14) -> list[dict]:
+    """Агрегация LLM-метрик по моделям за последние N дней."""
+    try:
+        with _cursor() as cur:
+            cur.execute(
+                """
+                SELECT
+                    model,
+                    COUNT(*)                                                       AS calls,
+                    SUM(CASE WHEN status = 'error' THEN 1 ELSE 0 END)            AS errors,
+                    AVG(duration_ms)                                               AS avg_duration_ms,
+                    COALESCE(SUM(total_tokens), 0)                                 AS total_tokens
+                FROM chat_llm_calls
+                WHERE called_at >= NOW() - INTERVAL '1 day' * %s
+                GROUP BY model
+                ORDER BY calls DESC
+                """,
+                (days,),
+            )
+            return [
+                {
+                    "model": r.get("model") or "",
+                    "calls": _safe(r.get("calls"), int, 0),
+                    "errors": _safe(r.get("errors"), int, 0),
+                    "avg_duration_ms": _safe(r.get("avg_duration_ms"), float),
+                    "total_tokens": _safe(r.get("total_tokens"), int, 0),
+                }
+                for r in (cur.fetchall() or [])
+            ]
+    except Exception:
+        return []
+
+
+# ---------------------------------------------------------------------------
+# GET /api/dashboard/llm/context_chunks
+# ---------------------------------------------------------------------------
+
+@router.get("/llm/context_chunks")
+def get_llm_context_chunks(limit_requests: int = 20) -> list[dict]:
+    """Чанки контекста, переданные в LLM, для последних N LLM-вызовов."""
+    try:
+        with _cursor() as cur:
+            cur.execute(
+                """
+                WITH recent AS (
+                    SELECT
+                        l.request_id,
+                        l.called_at,
+                        LEFT(r.query_text, 120) AS query_preview
+                    FROM chat_llm_calls l
+                    LEFT JOIN chat_requests r ON r.request_id = l.request_id
+                    ORDER BY l.called_at DESC
+                    LIMIT %s
+                )
+                SELECT
+                    rc.request_id,
+                    rc.called_at,
+                    rc.query_preview,
+                    c.rank,
+                    c.doc_id,
+                    c.chunk_id,
+                    c.score
+                FROM recent rc
+                LEFT JOIN chat_retrieved_chunks c ON c.request_id = rc.request_id
+                ORDER BY rc.called_at DESC, c.rank ASC NULLS LAST
+                """,
+                (limit_requests,),
+            )
+            rows = cur.fetchall() or []
+            return [
+                {
+                    "request_id": r.get("request_id"),
+                    "called_at": _dt(r.get("called_at")),
+                    "query_preview": r.get("query_preview") or "",
+                    "rank": _safe(r.get("rank"), int),
+                    "doc_id": r.get("doc_id") or "",
+                    "chunk_id": r.get("chunk_id"),
+                    "score": _safe(r.get("score"), float),
+                }
+                for r in rows
+                if (r.get("doc_id") or "").strip()
+            ]
+    except Exception:
+        return []
+
+
+# ---------------------------------------------------------------------------
 # GET /api/dashboard/retrieve/overview
 # ---------------------------------------------------------------------------
 
@@ -566,30 +840,55 @@ def get_retrieve_overview() -> dict[str, Any]:
         "total_requests": 0,
         "ok_count": 0,
         "error_count": 0,
+        "p50_total_ms": None,
         "avg_total_ms": None,
         "p95_total_ms": None,
         "avg_semantic_ms": None,
         "avg_bm25_ms": None,
         "bm25_fallback_count": 0,
+        "avg_bm25_semantic_overlap": 0.0,
         "avg_result_hits": 0.0,
+        "empty_result_rate_pct": 0.0,
+        "low_result_rate_pct": 0.0,
+        "avg_unique_docs_per_request": 0.0,
     }
     try:
         with _cursor() as cur:
             cur.execute(
                 """
+                WITH base AS (
+                    SELECT *
+                    FROM ret_requests
+                    WHERE created_at >= NOW() - INTERVAL '24 hours'
+                ),
+                diversity AS (
+                    SELECT
+                        request_id,
+                        COUNT(DISTINCT doc_id) AS unique_docs
+                    FROM ret_chunks
+                    WHERE request_id IN (SELECT request_id FROM base)
+                    GROUP BY request_id
+                )
                 SELECT
                     COUNT(*)                                                       AS total_requests,
                     SUM(CASE WHEN status = 'ok' THEN 1 ELSE 0 END)               AS ok_count,
                     SUM(CASE WHEN status = 'error' THEN 1 ELSE 0 END)            AS error_count,
+                    PERCENTILE_CONT(0.50) WITHIN GROUP (ORDER BY total_duration_ms)
+                        FILTER (WHERE status = 'ok')                              AS p50_total_ms,
                     AVG(total_duration_ms)                                        AS avg_total_ms,
                     PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY total_duration_ms)
                         FILTER (WHERE status = 'ok')                              AS p95_total_ms,
                     AVG(semantic_duration_ms)                                     AS avg_semantic_ms,
                     AVG(bm25_duration_ms)                                         AS avg_bm25_ms,
                     SUM(CASE WHEN bm25_fallback THEN 1 ELSE 0 END)               AS bm25_fallback_count,
-                    AVG(result_hits)                                              AS avg_result_hits
-                FROM ret_requests
-                WHERE created_at >= NOW() - INTERVAL '24 hours'
+                    AVG(bm25_semantic_overlap)                                    AS avg_bm25_semantic_overlap,
+                    AVG(result_hits)                                              AS avg_result_hits,
+                    100.0 * AVG(CASE WHEN result_hits = 0 THEN 1.0 ELSE 0.0 END) AS empty_result_rate_pct,
+                    100.0 * AVG(CASE WHEN result_hits < top_k THEN 1.0 ELSE 0.0 END)
+                                                                                  AS low_result_rate_pct,
+                    AVG(COALESCE(d.unique_docs, 0))                               AS avg_unique_docs_per_request
+                FROM base r
+                LEFT JOIN diversity d ON d.request_id = r.request_id
                 """
             )
             row = cur.fetchone() or {}
@@ -597,12 +896,17 @@ def get_retrieve_overview() -> dict[str, Any]:
                 "total_requests": _safe(row.get("total_requests"), int, 0),
                 "ok_count": _safe(row.get("ok_count"), int, 0),
                 "error_count": _safe(row.get("error_count"), int, 0),
+                "p50_total_ms": _safe(row.get("p50_total_ms"), float),
                 "avg_total_ms": _safe(row.get("avg_total_ms"), float),
                 "p95_total_ms": _safe(row.get("p95_total_ms"), float),
                 "avg_semantic_ms": _safe(row.get("avg_semantic_ms"), float),
                 "avg_bm25_ms": _safe(row.get("avg_bm25_ms"), float),
                 "bm25_fallback_count": _safe(row.get("bm25_fallback_count"), int, 0),
+                "avg_bm25_semantic_overlap": round(_safe(row.get("avg_bm25_semantic_overlap"), float, 0.0), 2),
                 "avg_result_hits": round(_safe(row.get("avg_result_hits"), float, 0.0), 2),
+                "empty_result_rate_pct": round(_safe(row.get("empty_result_rate_pct"), float, 0.0), 2),
+                "low_result_rate_pct": round(_safe(row.get("low_result_rate_pct"), float, 0.0), 2),
+                "avg_unique_docs_per_request": round(_safe(row.get("avg_unique_docs_per_request"), float, 0.0), 2),
             }
     except Exception:
         return defaults
@@ -627,6 +931,7 @@ def get_retrieve_recent(limit: int = 20) -> list[dict]:
                     candidates,
                     semantic_hits,
                     bm25_hits,
+                    bm25_semantic_overlap,
                     fused_hits,
                     result_hits,
                     bm25_missing_ids,
@@ -651,6 +956,7 @@ def get_retrieve_recent(limit: int = 20) -> list[dict]:
                     "candidates": _safe(r.get("candidates"), int, 0),
                     "semantic_hits": _safe(r.get("semantic_hits"), int, 0),
                     "bm25_hits": _safe(r.get("bm25_hits"), int, 0),
+                    "bm25_semantic_overlap": _safe(r.get("bm25_semantic_overlap"), int, 0),
                     "fused_hits": _safe(r.get("fused_hits"), int, 0),
                     "result_hits": _safe(r.get("result_hits"), int, 0),
                     "bm25_missing_ids": _safe(r.get("bm25_missing_ids"), int, 0),
@@ -665,6 +971,38 @@ def get_retrieve_recent(limit: int = 20) -> list[dict]:
             ]
     except Exception:
         return []
+
+
+# ---------------------------------------------------------------------------
+# GET /api/dashboard/retrieve/eval_summary
+# ---------------------------------------------------------------------------
+
+@router.get("/retrieve/eval_summary")
+def get_retrieve_eval_summary() -> dict[str, Any]:
+    """Последний offline-eval retrieval из data/eval/retrieval_eval_report.json."""
+    defaults: dict[str, Any] = {
+        "generated_at": None,
+        "top_k": 0,
+        "queries_total": 0,
+        "metrics": {
+            "recall_at_k_doc": 0.0,
+            "precision_at_k_doc": 0.0,
+            "mrr_at_k_doc": 0.0,
+            "ndcg_at_k_doc": 0.0,
+            "ndcg_at_k_hint": 0.0,
+        },
+        "by_difficulty": {},
+    }
+    data = _safe_read_json(RETRIEVAL_EVAL_REPORT)
+    if not isinstance(data, dict):
+        return defaults
+    return {
+        "generated_at": data.get("generated_at"),
+        "top_k": _safe(data.get("top_k"), int, 0),
+        "queries_total": _safe(data.get("queries_total"), int, 0),
+        "metrics": data.get("metrics", defaults["metrics"]),
+        "by_difficulty": data.get("by_difficulty", {}),
+    }
 
 
 # ---------------------------------------------------------------------------

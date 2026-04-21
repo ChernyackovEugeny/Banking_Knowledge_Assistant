@@ -120,12 +120,17 @@ export interface RetrieveOverviewData {
   total_requests: number
   ok_count: number
   error_count: number
+  p50_total_ms: number | null
   avg_total_ms: number | null
   p95_total_ms: number | null
   avg_semantic_ms: number | null
   avg_bm25_ms: number | null
   bm25_fallback_count: number
+  avg_bm25_semantic_overlap: number
   avg_result_hits: number
+  empty_result_rate_pct: number
+  low_result_rate_pct: number
+  avg_unique_docs_per_request: number
 }
 
 export interface RetrieveRecentEntry {
@@ -136,6 +141,7 @@ export interface RetrieveRecentEntry {
   candidates: number
   semantic_hits: number
   bm25_hits: number
+  bm25_semantic_overlap: number
   fused_hits: number
   result_hits: number
   bm25_missing_ids: number
@@ -153,6 +159,52 @@ export interface RetrieveTopDocEntry {
   unique_requests: number
   avg_score: number
   avg_rank: number
+}
+
+export interface LlmOverviewData {
+  total_calls: number
+  ok_count: number
+  error_count: number
+  p50_duration_ms: number | null
+  avg_duration_ms: number | null
+  p95_duration_ms: number | null
+  total_tokens_24h: number
+  prompt_tokens_24h: number
+  completion_tokens_24h: number
+  avg_tokens_per_call: number
+}
+
+export interface LlmRecentEntry {
+  call_id: string
+  request_id: string
+  query_preview: string
+  session_short: string
+  model: string
+  status: string
+  duration_ms: number | null
+  prompt_tokens: number | null
+  completion_tokens: number | null
+  total_tokens: number | null
+  called_at: string | null
+  error_msg: string | null
+}
+
+export interface LlmModelEntry {
+  model: string
+  calls: number
+  errors: number
+  avg_duration_ms: number | null
+  total_tokens: number
+}
+
+export interface LlmContextChunkEntry {
+  request_id: string
+  called_at: string | null
+  query_preview: string
+  rank: number | null
+  doc_id: string
+  chunk_id: string | null
+  score: number | null
 }
 
 export interface ArtifactSummary {
@@ -272,3 +324,10 @@ export const fetchArtifacts  = () => get<ArtifactsData>('/artifacts')
 export const fetchRetrieveOverview = () => get<RetrieveOverviewData>('/retrieve/overview')
 export const fetchRetrieveRecent = (limit = 20) => get<RetrieveRecentEntry[]>(`/retrieve/recent?limit=${limit}`)
 export const fetchRetrieveTopDocs = (limit = 10) => get<RetrieveTopDocEntry[]>(`/retrieve/top_docs?limit=${limit}`)
+export const fetchLlmOverview = () => get<LlmOverviewData>('/llm/overview')
+export const fetchLlmTimeline = (hours = 24) => get<TimelinePoint[]>(`/llm/timeline?hours=${hours}`)
+export const fetchLlmTokens = (days = 14) => get<TokenPoint[]>(`/llm/tokens?days=${days}`)
+export const fetchLlmRecent = (limit = 20) => get<LlmRecentEntry[]>(`/llm/recent?limit=${limit}`)
+export const fetchLlmModels = (days = 14) => get<LlmModelEntry[]>(`/llm/models?days=${days}`)
+export const fetchLlmContextChunks = (limitRequests = 20) =>
+  get<LlmContextChunkEntry[]>(`/llm/context_chunks?limit_requests=${limitRequests}`)

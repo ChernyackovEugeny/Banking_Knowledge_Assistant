@@ -67,6 +67,7 @@ async def retrieve(
     query: str,
     top_k: int = 5,
     cluster: str | None = None,
+    parent_chat_request_id: str | None = None,
 ) -> list[RetrievedChunk]:
     """Return top-k relevant chunks with hybrid retrieval (semantic + BM25 + RRF)."""
     clean_query = query.strip()
@@ -81,11 +82,14 @@ async def retrieve(
     bm25_duration_ms: float | None = None
     semantic_hits = 0
     bm25_hits = 0
+    bm25_semantic_overlap = 0
     fused_hits = 0
     result_hits = 0
     bm25_missing_ids = 0
     bm25_fallback = False
     source = "hybrid_rrf"
+    retrieval_version = settings.observability_retrieval_version
+    config_version = settings.observability_config_version
     status = "ok"
     error_msg: str | None = None
     results: list[RetrievedChunk] = []
@@ -139,6 +143,7 @@ async def retrieve(
         semantic_ids = [row["chunk_id"] for row in semantic_results]
         bm25_ids = [chunk_id for chunk_id, _ in bm25_results]
         bm25_hits = len(bm25_results)
+        bm25_semantic_overlap = len(set(bm25_ids) & set(semantic_ids))
         fused = reciprocal_rank_fusion(
             [bm25_ids, semantic_ids],
             k=settings.retrieval_rrf_k,
@@ -209,6 +214,7 @@ async def retrieve(
                 candidates=candidates,
                 semantic_hits=semantic_hits,
                 bm25_hits=bm25_hits,
+                bm25_semantic_overlap=bm25_semantic_overlap,
                 fused_hits=fused_hits,
                 result_hits=result_hits,
                 bm25_missing_ids=bm25_missing_ids,
@@ -220,5 +226,8 @@ async def retrieve(
                 error_msg=error_msg,
                 chunks=results[:top_k],
                 source=source,
+                parent_chat_request_id=parent_chat_request_id,
+                retrieval_version=retrieval_version,
+                config_version=config_version,
             )
         )

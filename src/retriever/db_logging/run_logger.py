@@ -18,12 +18,16 @@ logger = logging.getLogger(__name__)
 _DDL = """
 CREATE TABLE IF NOT EXISTS ret_requests (
     request_id            TEXT PRIMARY KEY,
+    parent_chat_request_id TEXT,
     query_text            TEXT NOT NULL,
     cluster               TEXT,
+    retrieval_version     TEXT NOT NULL DEFAULT 'hybrid_rrf_v1',
+    config_version        TEXT NOT NULL DEFAULT 'v1',
     top_k                 INTEGER NOT NULL,
     candidates            INTEGER NOT NULL,
     semantic_hits         INTEGER NOT NULL DEFAULT 0,
     bm25_hits             INTEGER NOT NULL DEFAULT 0,
+    bm25_semantic_overlap INTEGER NOT NULL DEFAULT 0,
     fused_hits            INTEGER NOT NULL DEFAULT 0,
     result_hits           INTEGER NOT NULL DEFAULT 0,
     bm25_missing_ids      INTEGER NOT NULL DEFAULT 0,
@@ -36,10 +40,21 @@ CREATE TABLE IF NOT EXISTS ret_requests (
     created_at            TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+ALTER TABLE ret_requests
+    ADD COLUMN IF NOT EXISTS parent_chat_request_id TEXT;
+ALTER TABLE ret_requests
+    ADD COLUMN IF NOT EXISTS retrieval_version TEXT NOT NULL DEFAULT 'hybrid_rrf_v1';
+ALTER TABLE ret_requests
+    ADD COLUMN IF NOT EXISTS config_version TEXT NOT NULL DEFAULT 'v1';
+ALTER TABLE ret_requests
+    ADD COLUMN IF NOT EXISTS bm25_semantic_overlap INTEGER NOT NULL DEFAULT 0;
+
 CREATE INDEX IF NOT EXISTS idx_ret_requests_time
     ON ret_requests (created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_ret_requests_status
     ON ret_requests (status, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_ret_requests_parent_chat
+    ON ret_requests (parent_chat_request_id);
 
 CREATE TABLE IF NOT EXISTS ret_chunks (
     id           BIGSERIAL PRIMARY KEY,
@@ -125,12 +140,16 @@ class RetrieverLogger:
         cls,
         *,
         request_id: str,
+        parent_chat_request_id: str | None,
         query_text: str,
         cluster: str | None,
+        retrieval_version: str,
+        config_version: str,
         top_k: int,
         candidates: int,
         semantic_hits: int,
         bm25_hits: int,
+        bm25_semantic_overlap: int,
         fused_hits: int,
         result_hits: int,
         bm25_missing_ids: int,
@@ -150,12 +169,16 @@ class RetrieverLogger:
             None,
             cls._sync_log_request,
             request_id,
+            parent_chat_request_id,
             query_text,
             cluster,
+            retrieval_version,
+            config_version,
             top_k,
             candidates,
             semantic_hits,
             bm25_hits,
+            bm25_semantic_overlap,
             fused_hits,
             result_hits,
             bm25_missing_ids,
@@ -173,12 +196,16 @@ class RetrieverLogger:
     def _sync_log_request(
         cls,
         request_id: str,
+        parent_chat_request_id: str | None,
         query_text: str,
         cluster: str | None,
+        retrieval_version: str,
+        config_version: str,
         top_k: int,
         candidates: int,
         semantic_hits: int,
         bm25_hits: int,
+        bm25_semantic_overlap: int,
         fused_hits: int,
         result_hits: int,
         bm25_missing_ids: int,
@@ -199,21 +226,26 @@ class RetrieverLogger:
                 cur.execute(
                     """
                     INSERT INTO ret_requests
-                        (request_id, query_text, cluster, top_k, candidates,
-                         semantic_hits, bm25_hits, fused_hits, result_hits, bm25_missing_ids,
+                        (request_id, parent_chat_request_id, query_text, cluster,
+                         retrieval_version, config_version, top_k, candidates,
+                         semantic_hits, bm25_hits, bm25_semantic_overlap, fused_hits, result_hits, bm25_missing_ids,
                          bm25_fallback, semantic_duration_ms, bm25_duration_ms, total_duration_ms,
                          status, error_msg, created_at)
                     VALUES
-                        (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     """,
                     (
                         request_id,
+                        parent_chat_request_id,
                         query_text,
                         cluster,
+                        retrieval_version,
+                        config_version,
                         top_k,
                         candidates,
                         semantic_hits,
                         bm25_hits,
+                        bm25_semantic_overlap,
                         fused_hits,
                         result_hits,
                         bm25_missing_ids,
